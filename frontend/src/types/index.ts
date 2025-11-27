@@ -19,14 +19,16 @@ export interface Edge {
 }
 
 export interface SearchResult {
-  id: string;
-  title?: string;
-  text_snippet: string;
-  score: number;
-  vector_score: number;
+  node: Node;
+  cosine_similarity: number;
+  cosine_normalized: number;
   graph_score: number;
-  neighbors: number;
-  metadata: Record<string, any>;
+  graph_normalized: number;
+  final_score: number;
+  rank: number;
+  vector_only_rank: number;
+  degree: number;
+  avg_edge_weight: number;
 }
 
 export interface Stats {
@@ -48,13 +50,12 @@ export interface PaginatedResponse<T> {
 }
 
 export interface SearchRequest {
-  query: string;
+  query_text: string;
+  top_k?: number;
   vector_weight?: number;
   graph_weight?: number;
-  filters?: {
-    topic?: string;
-    category?: string;
-  };
+  source_filter?: string;
+  topic_filter?: string;
 }
 
 export interface NeighborsResponse {

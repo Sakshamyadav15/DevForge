@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { statsApi, nodesApi } from "@/lib/api";
-import { mockStats, mockNodes } from "@/lib/mockData";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,15 +22,13 @@ const Stats = () => {
   const { data: stats } = useQuery({
     queryKey: ["stats"],
     queryFn: statsApi.get,
-    placeholderData: mockStats,
-    retry: false,
+    retry: 1,
   });
 
   const { data: nodesData } = useQuery({
     queryKey: ["nodes-stats"],
-    queryFn: () => nodesApi.list({ limit: 1000 }),
-    placeholderData: { items: mockNodes, total: mockNodes.length },
-    retry: false,
+    queryFn: () => nodesApi.getAll(1, 1000),
+    retry: 1,
   });
 
   // Aggregate data for charts

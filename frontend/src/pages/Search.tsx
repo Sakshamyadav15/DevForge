@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { searchApi } from "@/lib/api";
-import { mockSearchResults } from "@/lib/mockData";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,17 +22,14 @@ const Search = () => {
     error,
   } = useMutation({
     mutationFn: searchApi.hybrid,
-    onError: () => {
-      // Use mock data on error
-      return { results: mockSearchResults };
-    },
   });
 
   const handleSearch = () => {
     if (!query.trim()) return;
 
     performSearch({
-      query,
+      query_text: query,
+      top_k: 10,
       vector_weight: vectorWeight[0],
       graph_weight: graphWeight[0],
     });
@@ -127,9 +123,9 @@ const Search = () => {
       </Card>
 
       {error && (
-        <Alert className="border-2">
+        <Alert className="border-2 border-red-500">
           <AlertDescription>
-            Unable to connect to backend. Showing mock results for demonstration.
+            Search failed. Please check your backend connection.
           </AlertDescription>
         </Alert>
       )}
@@ -138,41 +134,45 @@ const Search = () => {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-xl font-bold font-mono">
-              {results.results.length} Results
+              {results.results?.length || 0} Results
             </h2>
           </div>
 
-          {results.results.map((result: SearchResult, index: number) => (
-            <Card key={result.id} className="border-2">
+          {results.results?.map((result: SearchResult) => (
+            <Card key={result.node.id} className="border-2">
               <CardContent className="pt-6">
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <Badge variant="outline" className="border-2 font-mono mb-2">
-                      Rank #{index + 1}
+                      Rank #{result.rank}
                     </Badge>
-                    <h3 className="font-bold text-lg">
-                      {result.title || result.id}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      (Vector-only rank: #{result.vector_only_rank})
+                    </span>
+                    <h3 className="font-bold text-lg mt-1">
+                      {result.node.id}
                     </h3>
                   </div>
                   <div className="text-right">
                     <div className="text-2xl font-bold font-mono">
-                      {result.score.toFixed(3)}
+                      {result.final_score.toFixed(3)}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      Total Score
+                      Final Score
                     </div>
                   </div>
                 </div>
 
-                <p className="text-sm mb-4 leading-relaxed">
-                  {highlightText(result.text_snippet, query)}
+                <p className="text-sm mb-4 leading-relaxed line-clamp-3">
+                  {result.node.text?.substring(0, 300)}
+                  {(result.node.text?.length || 0) > 300 ? "..." : ""}
                 </p>
 
-                <div className="flex gap-4 text-xs font-mono">
+                <div className="flex flex-wrap gap-4 text-xs font-mono">
                   <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">Vector:</span>
+                    <span className="text-muted-foreground">Cosine:</span>
                     <Badge variant="secondary" className="border-2">
-                      {result.vector_score.toFixed(3)}
+                      {result.cosine_similarity.toFixed(3)}
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2">
@@ -182,9 +182,15 @@ const Search = () => {
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">Neighbors:</span>
+                    <span className="text-muted-foreground">Degree:</span>
                     <Badge variant="outline" className="border-2">
-                      {result.neighbors}
+                      {result.degree}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Avg Weight:</span>
+                    <Badge variant="outline" className="border-2">
+                      {result.avg_edge_weight.toFixed(2)}
                     </Badge>
                   </div>
                 </div>

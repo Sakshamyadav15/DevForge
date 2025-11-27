@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { statsApi } from "@/lib/api";
-import { mockStats } from "@/lib/mockData";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -10,8 +9,7 @@ const Ingestion = () => {
   const { data: stats } = useQuery({
     queryKey: ["stats"],
     queryFn: statsApi.get,
-    placeholderData: mockStats,
-    retry: false,
+    retry: 1,
   });
 
   const commands = [

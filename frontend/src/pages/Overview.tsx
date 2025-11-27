@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { statsApi } from "@/lib/api";
-import { mockStats } from "@/lib/mockData";
 import { StatCard } from "@/components/StatCard";
 import { Database, GitBranch, Clock, HardDrive, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -20,9 +19,8 @@ const Overview = () => {
   } = useQuery({
     queryKey: ["stats"],
     queryFn: statsApi.get,
-    // Fallback to mock data on error
-    placeholderData: mockStats,
-    retry: false,
+    retry: 1,
+    staleTime: 30000,
   });
 
   const { data: health } = useQuery({

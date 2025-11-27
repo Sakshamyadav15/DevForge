@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { edgesApi } from "@/lib/api";
-import { mockEdges } from "@/lib/mockData";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -32,13 +31,8 @@ const Edges = () => {
   const { data, isLoading } = useQuery({
     queryKey: ["edges", page, typeFilter],
     queryFn: () =>
-      edgesApi.list({
-        limit: ITEMS_PER_PAGE,
-        offset: page * ITEMS_PER_PAGE,
-        type: typeFilter || undefined,
-      }),
-    placeholderData: { items: mockEdges, total: mockEdges.length },
-    retry: false,
+      edgesApi.getAll(page + 1, ITEMS_PER_PAGE),
+    retry: 1,
   });
 
   const totalPages = Math.ceil((data?.total || 0) / ITEMS_PER_PAGE);

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { nodesApi } from "@/lib/api";
-import { mockNodes } from "@/lib/mockData";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,13 +33,8 @@ const Nodes = () => {
   const { data, isLoading } = useQuery({
     queryKey: ["nodes", page, topicFilter],
     queryFn: () =>
-      nodesApi.list({
-        limit: ITEMS_PER_PAGE,
-        offset: page * ITEMS_PER_PAGE,
-        topic: topicFilter || undefined,
-      }),
-    placeholderData: { items: mockNodes, total: mockNodes.length },
-    retry: false,
+      nodesApi.getAll(page + 1, ITEMS_PER_PAGE),
+    retry: 1,
   });
 
   const filteredItems = data?.items.filter((node) =>
