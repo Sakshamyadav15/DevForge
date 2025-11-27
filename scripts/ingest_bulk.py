@@ -1,57 +1,47 @@
+#!/usr/bin/env python3
 """
-Bulk Data Ingestion Script for 25K+ Documents
+DevForge Bulk Data Ingestion Script
 
-This script handles large-scale data ingestion from:
-1. arXiv Kaggle dataset (JSON lines)
-2. HuggingFace datasets
-3. Custom JSON files
-
-Optimized for:
-- Batch processing (faster than one-by-one API calls)
-- Memory efficiency (streaming for large files)
-- Progress tracking
-- Resume capability
+Ingests large datasets into DevForge via direct snapshot writing.
+Supports: HuggingFace datasets (arxiv, pubmed), arXiv Kaggle, custom JSON.
 
 Usage:
-    # From HuggingFace (easiest - no download needed)
-    python -m scripts.ingest_bulk --source huggingface --limit 25000
+    # AI/ML papers (25K)
+    python -m scripts.ingest_bulk -l 25000 -t arxiv
     
-    # From arXiv Kaggle dataset
-    python -m scripts.ingest_bulk --source arxiv --file path/to/arxiv-metadata-oai-snapshot.json --limit 25000
+    # Medical papers (25K)  
+    python -m scripts.ingest_bulk -l 25000 -t pubmed
     
-    # From custom JSON
-    python -m scripts.ingest_bulk --source json --file data/my_papers.json --limit 25000
+    # From local arXiv JSON
+    python -m scripts.ingest_bulk --source arxiv --file path/to/arxiv.json -l 25000
 """
 
-import json
 import argparse
-import time
+import json
 import random
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Generator, Optional
-from datetime import datetime
 from dataclasses import dataclass
 
-# =============================================================================
-# Configuration
-# =============================================================================
-
-DEVFORGE_API_URL = "http://localhost:8000"
-BATCH_SIZE = 100  # Nodes per batch for API calls
+# Paths
 SNAPSHOT_PATH = Path("data/snapshot.json")
+DEVFORGE_API_URL = "http://localhost:8000"
 
-# Categories to filter (for arXiv) - focus on AI/ML/CS
+# AI/ML categories for filtering
 ARXIV_CATEGORIES = [
-    "cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.NE", "cs.IR",  # CS/AI
-    "stat.ML",  # Stats ML
-    "q-bio",  # Quantitative Biology
-    "eess.SP",  # Signal Processing
+    "cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.NE", "cs.RO",
+    "stat.ML", "cs.IR", "cs.MA", "cs.HC"
 ]
+
+# Edge types
+EDGE_TYPES = ["CITES", "RELATED_TO", "SIMILAR_TO", "REFERENCES", "BUILDS_ON"]
 
 
 @dataclass
 class Document:
-    """Represents a document to be ingested."""
+    """Represents a document to ingest."""
     id: str
     text: str
     metadata: dict
@@ -65,11 +55,11 @@ def load_from_huggingface(limit: int = 25000, topic: str = "arxiv") -> Generator
     """
     Load documents from HuggingFace datasets.
     
-    This is the EASIEST option - no manual download required.
+    Uses modern Parquet-based datasets (no custom scripts required).
     
     Args:
         limit: Maximum number of documents
-        topic: Dataset variant ("arxiv" or "pubmed")
+        topic: "arxiv" for AI/ML papers, "pubmed" for medical papers
         
     Yields:
         Document objects
@@ -80,28 +70,48 @@ def load_from_huggingface(limit: int = 25000, topic: str = "arxiv") -> Generator
         print("Please install datasets: pip install datasets")
         return
     
-    print(f"Loading {limit} documents from HuggingFace scientific_papers/{topic}...")
+    # Map topics to datasets
+    if topic == "arxiv":
+        dataset_name = "ccdv/arxiv-summarization"
+        text_field = "article"
+        abstract_field = "abstract"
+    elif topic == "pubmed":
+        dataset_name = "ccdv/pubmed-summarization"
+        text_field = "article"
+        abstract_field = "abstract"
+    else:
+        print(f"Unknown topic: {topic}. Use 'arxiv' or 'pubmed'.")
+        return
+    
+    print(f"Loading {limit} documents from HuggingFace {dataset_name}...")
     print("(This may take a few minutes on first run - downloading dataset)")
     
-    # Load with streaming to avoid memory issues
-    dataset = load_dataset(
-        "scientific_papers", 
-        topic,
-        split=f"train[:{limit}]",
-        trust_remote_code=True
-    )
+    try:
+        # Use streaming to avoid memory issues
+        dataset = load_dataset(
+            dataset_name,
+            split="train",
+            streaming=True
+        )
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
     
+    count = 0
     for i, item in enumerate(dataset):
+        if count >= limit:
+            break
+        
         doc_id = f"hf_{topic}_{i:06d}"
         
-        # Combine article sections for text
-        text = item.get("article", "")[:5000]  # Limit text length
-        abstract = item.get("abstract", "")
+        # Get text and abstract
+        text = str(item.get(text_field, ""))[:5000]
+        abstract = str(item.get(abstract_field, ""))
         
         if abstract:
             text = f"{abstract}\n\n{text}"
         
-        if len(text) < 100:  # Skip very short docs
+        if len(text) < 100:
             continue
         
         yield Document(
@@ -109,13 +119,15 @@ def load_from_huggingface(limit: int = 25000, topic: str = "arxiv") -> Generator
             text=text,
             metadata={
                 "source": "huggingface",
-                "dataset": f"scientific_papers/{topic}",
+                "dataset": dataset_name,
+                "topic": topic,
                 "index": i
             }
         )
         
-        if (i + 1) % 1000 == 0:
-            print(f"  Processed {i + 1}/{limit} documents...")
+        count += 1
+        if count % 1000 == 0:
+            print(f"  Processed {count}/{limit} documents...")
 
 
 # =============================================================================
@@ -131,14 +143,6 @@ def load_from_arxiv_kaggle(
     Load documents from arXiv Kaggle dataset (JSON lines format).
     
     Download from: https://www.kaggle.com/datasets/Cornell-University/arxiv
-    
-    Args:
-        file_path: Path to arxiv-metadata-oai-snapshot.json
-        limit: Maximum number of documents
-        categories: arXiv categories to filter (e.g., ["cs.AI", "cs.LG"])
-        
-    Yields:
-        Document objects
     """
     categories = categories or ARXIV_CATEGORIES
     categories_set = set(categories)
@@ -158,40 +162,35 @@ def load_from_arxiv_kaggle(
             except json.JSONDecodeError:
                 continue
             
-            # Filter by category
             paper_categories = paper.get("categories", "").split()
-            if not any(cat in categories_set or any(cat.startswith(c.split('.')[0]) for c in categories_set) 
-                      for cat in paper_categories):
+            if not any(cat in categories_set for cat in paper_categories):
                 continue
             
-            # Extract fields
             arxiv_id = paper.get("id", f"arxiv_{line_num}")
             title = paper.get("title", "").replace("\n", " ")
             abstract = paper.get("abstract", "").replace("\n", " ")
             
-            if not abstract or len(abstract) < 100:
+            if len(abstract) < 50:
                 continue
             
             text = f"{title}\n\n{abstract}"
             
             yield Document(
-                id=f"arxiv_{arxiv_id.replace('.', '_').replace('/', '_')}",
+                id=f"arxiv_{arxiv_id}",
                 text=text,
                 metadata={
-                    "source": "arxiv",
+                    "source": "arxiv_kaggle",
                     "arxiv_id": arxiv_id,
                     "categories": paper_categories,
+                    "authors": paper.get("authors", ""),
                     "year": paper.get("update_date", "")[:4] if paper.get("update_date") else None,
-                    "authors": paper.get("authors", "")[:200],  # Truncate long author lists
+                    "topic": "arxiv"
                 }
             )
             
             count += 1
-            
             if count % 5000 == 0:
                 print(f"  Processed {count}/{limit} documents...")
-    
-    print(f"Loaded {count} documents from arXiv")
 
 
 # =============================================================================
@@ -199,60 +198,33 @@ def load_from_arxiv_kaggle(
 # =============================================================================
 
 def load_from_json(file_path: str, limit: int = 25000) -> Generator[Document, None, None]:
-    """
-    Load documents from a custom JSON file.
-    
-    Expected format:
-    [
-        {"id": "doc1", "text": "...", "metadata": {...}},
-        {"id": "doc2", "text": "...", "metadata": {...}}
-    ]
-    
-    Or JSON lines:
-    {"id": "doc1", "text": "...", "metadata": {...}}
-    {"id": "doc2", "text": "...", "metadata": {...}}
-    """
+    """Load from custom JSON file with documents array."""
     print(f"Loading from JSON: {file_path}")
     
-    path = Path(file_path)
-    count = 0
+    with open(file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
     
-    # Try JSON lines first
-    with open(path, 'r', encoding='utf-8') as f:
-        first_char = f.read(1)
-        f.seek(0)
+    documents = data if isinstance(data, list) else data.get("documents", [])
+    
+    for i, doc in enumerate(documents[:limit]):
+        doc_id = doc.get("id", f"json_{i:06d}")
+        text = doc.get("text", doc.get("content", doc.get("body", "")))
         
-        if first_char == '[':
-            # Regular JSON array
-            data = json.load(f)
-            for item in data[:limit]:
-                yield Document(
-                    id=item.get("id", f"json_{count}"),
-                    text=item.get("text", ""),
-                    metadata=item.get("metadata", {})
-                )
-                count += 1
-        else:
-            # JSON lines
-            for line in f:
-                if count >= limit:
-                    break
-                try:
-                    item = json.loads(line)
-                    yield Document(
-                        id=item.get("id", f"json_{count}"),
-                        text=item.get("text", ""),
-                        metadata=item.get("metadata", {})
-                    )
-                    count += 1
-                except json.JSONDecodeError:
-                    continue
-    
-    print(f"Loaded {count} documents from JSON")
+        if len(text) < 50:
+            continue
+        
+        yield Document(
+            id=doc_id,
+            text=text[:5000],
+            metadata=doc.get("metadata", {"source": "json", "index": i})
+        )
+        
+        if (i + 1) % 5000 == 0:
+            print(f"  Processed {i + 1} documents...")
 
 
 # =============================================================================
-# Direct Snapshot Writing (Faster than API)
+# Snapshot Writer
 # =============================================================================
 
 def write_to_snapshot(
@@ -261,18 +233,8 @@ def write_to_snapshot(
     create_edges: bool = True
 ) -> tuple[int, int]:
     """
-    Write documents directly to snapshot file (much faster than API).
-    
-    This bypasses the API and writes directly to the JSON snapshot.
-    On next server restart, data will be loaded into Neo4j and FAISS.
-    
-    Args:
-        documents: Generator of Document objects
-        limit: Maximum documents to process
-        create_edges: Whether to create random edges between documents
-        
-    Returns:
-        Tuple of (nodes_created, edges_created)
+    Write documents directly to snapshot file.
+    UPDATES existing data - does not overwrite.
     """
     print("\n" + "=" * 60)
     print("Writing to Snapshot (Direct Mode)")
@@ -282,8 +244,11 @@ def write_to_snapshot(
     
     # Load existing snapshot or create new
     if SNAPSHOT_PATH.exists():
+        print(f"Loading existing snapshot from {SNAPSHOT_PATH}...")
         with open(SNAPSHOT_PATH, 'r') as f:
             snapshot = json.load(f)
+        print(f"  Existing nodes: {len(snapshot.get('nodes', {})):,}")
+        print(f"  Existing edges: {len(snapshot.get('edges', [])):,}")
     else:
         snapshot = {"nodes": {}, "edges": [], "metadata": {}}
     
@@ -293,7 +258,6 @@ def write_to_snapshot(
     initial_node_count = len(nodes)
     initial_edge_count = len(edges)
     
-    # Collect new node IDs for edge creation
     new_node_ids = []
     
     print("\nProcessing documents...")
@@ -303,38 +267,34 @@ def write_to_snapshot(
         if i >= limit:
             break
         
-        # Add node
-        nodes[doc.id] = {
-            "text": doc.text,
-            "metadata": doc.metadata,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        new_node_ids.append(doc.id)
+        # Only add if not already exists
+        if doc.id not in nodes:
+            nodes[doc.id] = {
+                "text": doc.text,
+                "metadata": doc.metadata,
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            new_node_ids.append(doc.id)
         
-        # Progress update
         if (i + 1) % 5000 == 0:
             elapsed = time.time() - start_time
             rate = (i + 1) / elapsed
             print(f"  Processed {i + 1:,} documents ({rate:.1f} docs/sec)")
     
-    nodes_created = len(nodes) - initial_node_count
-    print(f"\nNodes added: {nodes_created:,}")
+    nodes_created = len(new_node_ids)
+    print(f"\nNew nodes added: {nodes_created:,}")
+    print(f"Total nodes now: {len(nodes):,}")
     
-    # Create edges between documents
+    # Create edges between NEW documents only
     edges_created = 0
     if create_edges and len(new_node_ids) > 1:
-        print("\nCreating edges...")
+        print("\nCreating edges for new documents...")
         
-        # Strategy: Create edges based on metadata similarity + random connections
-        # For 25K docs, create ~50K edges (2 edges per doc average)
-        
-        # Group by metadata for RELATED_TO edges
+        # Group by topic
         topic_groups = {}
         for node_id in new_node_ids:
-            topic = nodes[node_id]["metadata"].get("topic") or \
-                   nodes[node_id]["metadata"].get("dataset") or \
-                   "general"
+            topic = nodes[node_id]["metadata"].get("topic", "general")
             if topic not in topic_groups:
                 topic_groups[topic] = []
             topic_groups[topic].append(node_id)
@@ -344,114 +304,93 @@ def write_to_snapshot(
             if len(group_ids) < 2:
                 continue
             
-            # Connect sequential documents (simulating citation chains)
-            for i in range(len(group_ids) - 1):
-                if random.random() < 0.3:  # 30% chance
-                    edges.append({
-                        "id": f"edge_{group_ids[i]}_{group_ids[i+1]}_RELATED_TO",
-                        "source_id": group_ids[i],
-                        "target_id": group_ids[i + 1],
-                        "type": "RELATED_TO",
-                        "weight": round(random.uniform(0.5, 0.9), 2),
-                        "created_at": datetime.utcnow().isoformat()
-                    })
-                    edges_created += 1
-            
-            # Random connections within group
-            sample_size = min(len(group_ids), 100)
-            sampled = random.sample(group_ids, sample_size)
-            for i in range(0, len(sampled) - 1, 2):
+            # Sequential connections
+            for j in range(min(len(group_ids) - 1, 5000)):
                 edges.append({
-                    "id": f"edge_{sampled[i]}_{sampled[i+1]}_RELATED_TO",
-                    "source_id": sampled[i],
-                    "target_id": sampled[i + 1],
+                    "source": group_ids[j],
+                    "target": group_ids[j + 1],
                     "type": "RELATED_TO",
-                    "weight": round(random.uniform(0.4, 0.8), 2),
-                    "created_at": datetime.utcnow().isoformat()
+                    "weight": round(random.uniform(0.6, 0.9), 3),
+                    "metadata": {"auto_generated": True, "topic": topic}
                 })
                 edges_created += 1
-        
-        # Add some random "CITES" edges
-        if len(new_node_ids) > 100:
-            for _ in range(min(len(new_node_ids) // 10, 5000)):
-                source = random.choice(new_node_ids)
-                target = random.choice(new_node_ids)
-                if source != target:
-                    edges.append({
-                        "id": f"edge_{source}_{target}_CITES",
-                        "source_id": source,
-                        "target_id": target,
-                        "type": "CITES",
-                        "weight": round(random.uniform(0.7, 1.0), 2),
-                        "created_at": datetime.utcnow().isoformat()
-                    })
-                    edges_created += 1
+            
+            # Random connections within topic
+            sample_size = min(len(group_ids), 2000)
+            sampled = random.sample(group_ids, sample_size)
+            for j in range(0, len(sampled) - 1, 2):
+                edge_type = random.choice(EDGE_TYPES)
+                edges.append({
+                    "source": sampled[j],
+                    "target": sampled[j + 1],
+                    "type": edge_type,
+                    "weight": round(random.uniform(0.5, 1.0), 3),
+                    "metadata": {"auto_generated": True, "topic": topic}
+                })
+                edges_created += 1
         
         print(f"Edges created: {edges_created:,}")
     
     # Save snapshot
+    print("\nSaving snapshot...")
     snapshot["nodes"] = nodes
     snapshot["edges"] = edges
     snapshot["metadata"] = {
-        "version": "1.0",
-        "updated_at": datetime.utcnow().isoformat(),
-        "node_count": len(nodes),
-        "edge_count": len(edges)
+        "last_updated": datetime.utcnow().isoformat(),
+        "total_nodes": len(nodes),
+        "total_edges": len(edges)
     }
     
-    print("\nSaving snapshot...")
-    with open(SNAPSHOT_PATH, 'w', encoding='utf-8') as f:
-        json.dump(snapshot, f, indent=2)
+    with open(SNAPSHOT_PATH, 'w') as f:
+        json.dump(snapshot, f)
     
-    file_size = SNAPSHOT_PATH.stat().st_size / (1024 * 1024)
-    print(f"Snapshot saved: {SNAPSHOT_PATH} ({file_size:.1f} MB)")
+    size_mb = SNAPSHOT_PATH.stat().st_size / (1024 * 1024)
+    print(f"Snapshot saved: {SNAPSHOT_PATH} ({size_mb:.1f} MB)")
     
-    elapsed = time.time() - start_time
-    print(f"\nTotal time: {elapsed:.1f} seconds")
-    print(f"Rate: {nodes_created / elapsed:.1f} docs/sec")
+    total_time = time.time() - start_time
+    print(f"\nTotal time: {total_time:.1f} seconds")
     
     return nodes_created, edges_created
 
 
 # =============================================================================
-# Main Entry Point
+# Main
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Bulk ingest 25K+ documents into DevForge"
+    parser = argparse.ArgumentParser(description="DevForge Bulk Ingestion")
+    parser.add_argument(
+        "-l", "--limit",
+        type=int,
+        default=25000,
+        help="Maximum documents to ingest (default: 25000)"
     )
     parser.add_argument(
-        "--source", "-s",
+        "-s", "--source",
         choices=["huggingface", "arxiv", "json"],
         default="huggingface",
         help="Data source (default: huggingface)"
     )
     parser.add_argument(
-        "--file", "-f",
+        "-f", "--file",
         help="Path to data file (required for arxiv/json sources)"
     )
     parser.add_argument(
-        "--limit", "-l",
-        type=int,
-        default=25000,
-        help="Number of documents to ingest (default: 25000)"
-    )
-    parser.add_argument(
-        "--topic", "-t",
+        "-t", "--topic",
         default="arxiv",
-        help="HuggingFace dataset topic: 'arxiv' or 'pubmed' (default: arxiv)"
+        help="HuggingFace topic: 'arxiv' (AI/ML) or 'pubmed' (medical)"
     )
     parser.add_argument(
         "--no-edges",
         action="store_true",
-        help="Skip creating edges between documents"
+        help="Skip creating edges"
     )
     
     args = parser.parse_args()
     
     print("=" * 60)
     print(f"DevForge Bulk Ingestion - {args.limit:,} Documents")
+    print(f"Topic: {args.topic}")
     print("=" * 60)
     
     # Select data source
@@ -460,7 +399,6 @@ def main():
     elif args.source == "arxiv":
         if not args.file:
             print("ERROR: --file required for arxiv source")
-            print("Download from: https://www.kaggle.com/datasets/Cornell-University/arxiv")
             return
         documents = load_from_arxiv_kaggle(args.file, args.limit)
     elif args.source == "json":
@@ -472,26 +410,20 @@ def main():
         print(f"Unknown source: {args.source}")
         return
     
-    # Ingest documents
+    # Ingest
     nodes, edges = write_to_snapshot(
         documents,
         limit=args.limit,
         create_edges=not args.no_edges
     )
     
-    # Summary
     print("\n" + "=" * 60)
     print("INGESTION COMPLETE")
     print("=" * 60)
-    print(f"Total nodes: {nodes:,}")
-    print(f"Total edges: {edges:,}")
-    print(f"\nSnapshot saved to: {SNAPSHOT_PATH}")
-    print("\nNext steps:")
-    print("1. Start/restart the server to load data:")
-    print("   uvicorn app.main:app --reload")
-    print("\n2. The server will automatically rebuild indexes from snapshot")
-    print("\n3. Test with:")
-    print(f"   curl {DEVFORGE_API_URL}/stats")
+    print(f"New nodes added: {nodes:,}")
+    print(f"New edges added: {edges:,}")
+    print(f"\nSnapshot: {SNAPSHOT_PATH}")
+    print("\nNext: uvicorn app.main:app --reload")
 
 
 if __name__ == "__main__":
