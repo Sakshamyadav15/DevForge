@@ -25,8 +25,10 @@ from pathlib import Path
 from typing import Generator, Optional
 from dataclasses import dataclass
 
-# Paths
-SNAPSHOT_PATH = Path("data/snapshot.json")
+# Paths - Use absolute path relative to this script
+SCRIPT_DIR = Path(__file__).parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+SNAPSHOT_PATH = PROJECT_ROOT / "backend" / "data" / "snapshot.json"
 DEVFORGE_API_URL = "http://localhost:8000"
 
 # AI/ML categories for filtering
