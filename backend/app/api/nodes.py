@@ -114,45 +114,77 @@ async def create_node(
     description="Retrieve all nodes with optional pagination."
 )
 async def list_nodes(
-    page: int = Query(default=1, ge=1, description="Page number"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(default=10, ge=1, le=100, description="Items per page"),
+    limit: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page (alias for page_size)"),
+    offset: Optional[int] = Query(default=None, ge=0, description="Offset (alternative to page)"),
     source: Optional[str] = Query(default=None, description="Filter by source metadata"),
     topic: Optional[str] = Query(default=None, description="Filter by topic metadata"),
-    graph_store=Depends(get_graph_store)
+    category: Optional[str] = Query(default=None, description="Filter by category metadata"),
+    graph_store=Depends(get_graph_store),
+    snapshot_manager=Depends(get_snapshot_manager)
 ) -> PaginatedResponse:
     """
     List all nodes with pagination and optional filtering.
     
-    Args:
-        page: Page number (1-indexed)
-        page_size: Number of items per page
-        source: Optional filter by source metadata
-        topic: Optional filter by topic metadata
-        
-    Returns:
-        Paginated list of nodes
+    Supports both page-based (page/page_size) and offset-based (limit/offset) pagination.
     """
     try:
-        # Get all nodes
-        all_nodes = graph_store.get_all_nodes()
+        # Use limit/offset if provided, otherwise use page/page_size
+        if limit is not None:
+            page_size = limit
+        if offset is not None:
+            page = (offset // page_size) + 1
+        
+        # Try graph store first, fall back to snapshot
+        if graph_store:
+            all_nodes = graph_store.get_all_nodes()
+        else:
+            # Fall back to snapshot if Neo4j not available
+            snapshot_nodes = snapshot_manager.get_all_nodes() if snapshot_manager else {}
+            all_nodes = []
+            for node_id, node_data in snapshot_nodes.items():
+                from app.models.graph import Node
+                all_nodes.append(Node(
+                    id=node_id,
+                    text=node_data.get("text", ""),
+                    metadata=node_data.get("metadata", {}),
+                    created_at=node_data.get("created_at"),
+                    updated_at=node_data.get("updated_at")
+                ))
         
         # Apply filters
         if source:
             all_nodes = [n for n in all_nodes if n.metadata.get("source") == source]
         if topic:
             all_nodes = [n for n in all_nodes if n.metadata.get("topic") == topic]
+        if category:
+            all_nodes = [n for n in all_nodes if n.metadata.get("category") == category]
         
         # Calculate pagination
         total = len(all_nodes)
-        total_pages = (total + page_size - 1) // page_size
+        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
         
         # Slice for current page
         start = (page - 1) * page_size
         end = start + page_size
         page_items = all_nodes[start:end]
         
+        # Transform to frontend-compatible format
+        items = []
+        for n in page_items:
+            items.append({
+                "id": n.id,
+                "title": n.metadata.get("title"),
+                "text": n.text[:500] if n.text else None,
+                "topic": n.metadata.get("topic"),
+                "category": n.metadata.get("category"),
+                "created_at": n.created_at.isoformat() if n.created_at else None,
+                "metadata": n.metadata
+            })
+        
         return PaginatedResponse(
-            items=[n.model_dump() for n in page_items],
+            items=items,
             total=total,
             page=page,
             page_size=page_size,
@@ -224,6 +256,62 @@ async def get_node(
         neighbors=neighbors,
         edge_count=edge_count
     )
+
+
+@router.get(
+    "/{node_id}/neighbors",
+    summary="Get neighbors for a node (frontend-compatible)",
+    description="Returns nodes and edges connected to this node."
+)
+async def get_node_neighbors(
+    node_id: str,
+    limit: int = Query(default=50, ge=1, le=200, description="Maximum neighbors to return"),
+    graph_store=Depends(get_graph_store)
+):
+    """
+    Get neighbors and edges for a node.
+    
+    Returns:
+        {nodes: Node[], edges: Edge[]} for frontend graph visualization
+    """
+    node = graph_store.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
+    
+    edges = graph_store.get_edges_for_node(node_id)
+    
+    neighbor_ids = set()
+    for edge in edges:
+        if edge.source_id == node_id:
+            neighbor_ids.add(edge.target_id)
+        else:
+            neighbor_ids.add(edge.source_id)
+    
+    neighbors = []
+    for neighbor_id in list(neighbor_ids)[:limit]:
+        neighbor_node = graph_store.get_node(neighbor_id)
+        if neighbor_node:
+            neighbors.append({
+                "id": neighbor_node.id,
+                "text": neighbor_node.text[:200] if neighbor_node.text else None,
+                "topic": neighbor_node.metadata.get("topic"),
+                "category": neighbor_node.metadata.get("category"),
+                "created_at": neighbor_node.created_at.isoformat() if neighbor_node.created_at else None,
+                "metadata": neighbor_node.metadata
+            })
+    
+    edge_list = []
+    for edge in edges[:limit]:
+        edge_list.append({
+            "id": f"{edge.source_id}_{edge.target_id}_{edge.type}",
+            "source": edge.source_id,
+            "target": edge.target_id,
+            "type": edge.type,
+            "weight": edge.weight,
+            "created_at": edge.created_at.isoformat() if edge.created_at else None
+        })
+    
+    return {"nodes": neighbors, "edges": edge_list}
 
 
 @router.put(

@@ -277,6 +277,68 @@ async def hybrid_search(
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
+@router.post(
+    "/hybrid/simple",
+    summary="Hybrid search (frontend-compatible)",
+    description="Simplified hybrid search endpoint matching frontend expectations."
+)
+async def hybrid_search_simple(
+    request: dict,
+    hybrid_engine=Depends(get_hybrid_engine),
+    graph_store=Depends(get_graph_store)
+):
+    """
+    Frontend-compatible hybrid search.
+    
+    Accepts: {query, vector_weight?, graph_weight?, top_k?, filters?: {topic?, category?}}
+    Returns: {results: [{id, text_snippet, score, vector_score, graph_score, neighbors, metadata}]}
+    """
+    try:
+        query = request.get("query") or request.get("query_text", "")
+        if not query:
+            raise HTTPException(status_code=400, detail="Query is required")
+        
+        top_k = request.get("top_k", 10)
+        vector_weight = request.get("vector_weight")
+        graph_weight = request.get("graph_weight")
+        filters = request.get("filters", {})
+        topic_filter = filters.get("topic")
+        
+        response = hybrid_engine.hybrid_search(
+            query_text=query,
+            top_k=top_k,
+            vector_weight=vector_weight,
+            graph_weight=graph_weight,
+            topic_filter=topic_filter
+        )
+        
+        # Transform to frontend format
+        results = []
+        for r in response.results:
+            # Get neighbor count
+            edges = graph_store.get_edges_for_node(r.node.id) if graph_store else []
+            neighbor_count = len(edges)
+            
+            results.append({
+                "id": r.node.id,
+                "title": r.node.metadata.get("title"),
+                "text_snippet": r.node.text[:300] + "..." if len(r.node.text) > 300 else r.node.text,
+                "score": round(r.final_score, 4),
+                "vector_score": round(r.cosine_similarity, 4),
+                "graph_score": round(r.graph_score, 4),
+                "neighbors": neighbor_count,
+                "metadata": r.node.metadata
+            })
+        
+        return {"results": results}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Simple hybrid search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
 @router.get(
     "/compare",
     summary="Compare vector vs hybrid search",

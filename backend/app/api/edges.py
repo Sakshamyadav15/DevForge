@@ -115,27 +115,39 @@ async def create_edge(
 async def list_edges(
     page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(default=10, ge=1, le=100, description="Items per page"),
-    edge_type: Optional[str] = Query(default=None, description="Filter by edge type"),
-    source_id: Optional[str] = Query(default=None, description="Filter by source node"),
-    target_id: Optional[str] = Query(default=None, description="Filter by target node"),
-    graph_store=Depends(get_graph_store)
+    limit: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page (alias)"),
+    offset: Optional[int] = Query(default=None, ge=0, description="Offset"),
+    edge_type: Optional[str] = Query(default=None, alias="type", description="Filter by edge type"),
+    source_id: Optional[str] = Query(default=None, alias="sourceId", description="Filter by source node"),
+    target_id: Optional[str] = Query(default=None, alias="targetId", description="Filter by target node"),
+    graph_store=Depends(get_graph_store),
+    snapshot_manager=Depends(get_snapshot_manager)
 ) -> PaginatedResponse:
     """
     List all edges with pagination and optional filtering.
-    
-    Args:
-        page: Page number (1-indexed)
-        page_size: Number of items per page
-        edge_type: Optional filter by relationship type
-        source_id: Optional filter by source node ID
-        target_id: Optional filter by target node ID
-        
-    Returns:
-        Paginated list of edges
     """
     try:
-        # Get all edges
-        all_edges = graph_store.get_all_edges()
+        # Use limit/offset if provided
+        if limit is not None:
+            page_size = limit
+        if offset is not None:
+            page = (offset // page_size) + 1
+        
+        # Try graph store first, fall back to snapshot
+        if graph_store:
+            all_edges = graph_store.get_all_edges()
+        else:
+            snapshot_edges = snapshot_manager.get_all_edges() if snapshot_manager else []
+            all_edges = []
+            from app.models.graph import Edge
+            for edge_data in snapshot_edges:
+                all_edges.append(Edge(
+                    id=f"{edge_data.get('source')}_{edge_data.get('target')}_{edge_data.get('type')}",
+                    source_id=edge_data.get("source"),
+                    target_id=edge_data.get("target"),
+                    type=edge_data.get("type", "RELATED_TO"),
+                    weight=edge_data.get("weight", 1.0)
+                ))
         
         # Apply filters
         if edge_type:
@@ -154,8 +166,20 @@ async def list_edges(
         end = start + page_size
         page_items = all_edges[start:end]
         
+        # Transform to frontend format
+        items = []
+        for e in page_items:
+            items.append({
+                "id": e.id,
+                "source": e.source_id,
+                "target": e.target_id,
+                "type": e.type,
+                "weight": e.weight,
+                "created_at": e.created_at.isoformat() if e.created_at else None
+            })
+        
         return PaginatedResponse(
-            items=[e.model_dump() for e in page_items],
+            items=items,
             total=total,
             page=page,
             page_size=page_size,

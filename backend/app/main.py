@@ -254,25 +254,43 @@ async def health_check():
     return health_status
 
 
+@app.get("/healthz", tags=["Health"])
+async def health_check_simple():
+    """
+    Simple health check endpoint (frontend-compatible).
+    
+    Returns a simple status for load balancers and frontends.
+    """
+    if embedding_service and vector_store and snapshot_manager:
+        return {"status": "ok"}
+    return {"status": "error", "message": "One or more services unavailable"}
+
+
 @app.get("/stats", tags=["Health"])
 async def get_stats():
     """
-    Get system statistics.
+    Get system statistics (frontend-compatible format).
     
     Returns counts and metrics for all data stores.
     """
+    from datetime import datetime
+    
+    # Get snapshot last modified time
+    snapshot_updated = None
+    if snapshot_manager and snapshot_manager.snapshot_path.exists():
+        mtime = snapshot_manager.snapshot_path.stat().st_mtime
+        snapshot_updated = datetime.fromtimestamp(mtime).isoformat()
+    
     return {
+        # Frontend-compatible fields
+        "nodes": snapshot_manager.get_node_count() if snapshot_manager else 0,
+        "edges": snapshot_manager.get_edge_count() if snapshot_manager else 0,
+        "snapshot_last_updated": snapshot_updated,
+        "vector_index_size": len(vector_store) if vector_store else 0,
+        # Extended info
         "embedding": {
             "model": settings.embedding_model_name if not embedding_service.is_mock else "mock",
             "dimension": embedding_service.dimension if embedding_service else 0
-        },
-        "vector_store": {
-            "total_embeddings": len(vector_store) if vector_store else 0
-        },
-        "snapshot": {
-            "total_nodes": snapshot_manager.get_node_count() if snapshot_manager else 0,
-            "total_edges": snapshot_manager.get_edge_count() if snapshot_manager else 0,
-            "path": str(snapshot_manager.snapshot_path) if snapshot_manager else None
         },
         "config": {
             "neo4j_uri": settings.neo4j_uri,
