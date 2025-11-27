@@ -149,7 +149,40 @@ class SnapshotManager:
             with open(self.snapshot_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            self._cache = SnapshotData.from_dict(data)
+            # Handle both formats:
+            # 1. List format: [{"id": "...", "text": "...", ...}, ...]
+            # 2. Dict format: {"nodes": {...}, "edges": [...], "metadata": {...}}
+            if isinstance(data, list):
+                # Convert list format to dict format
+                logger.info(f"Converting list format snapshot ({len(data)} items) to dict format...")
+                nodes_dict = {}
+                for item in data:
+                    node_id = item.get("id")
+                    if node_id:
+                        nodes_dict[node_id] = {
+                            "text": item.get("text", item.get("title", "")),
+                            "metadata": item.get("metadata", {}),
+                            "created_at": item.get("created_at", datetime.utcnow().isoformat()),
+                            "updated_at": item.get("updated_at", datetime.utcnow().isoformat())
+                        }
+                        # Include title in metadata if present
+                        if "title" in item and "title" not in nodes_dict[node_id]["metadata"]:
+                            nodes_dict[node_id]["metadata"]["title"] = item["title"]
+                
+                self._cache = SnapshotData(
+                    nodes=nodes_dict,
+                    edges=[],
+                    metadata={
+                        "version": "1.0",
+                        "created_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "node_count": len(nodes_dict),
+                        "edge_count": 0
+                    }
+                )
+            else:
+                self._cache = SnapshotData.from_dict(data)
+            
             logger.info(
                 f"Loaded snapshot: {len(self._cache.nodes)} nodes, "
                 f"{len(self._cache.edges)} edges"
