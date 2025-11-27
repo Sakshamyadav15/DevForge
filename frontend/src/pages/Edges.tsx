@@ -56,6 +56,7 @@ import {
 import type { EdgeCreate } from "@/types";
 
 const ITEMS_PER_PAGE = 15;
+const ALL_TYPES_VALUE = "__all_edge_types__";
 
 const EDGE_TYPES = [
   "RELATED_TO",
@@ -72,7 +73,7 @@ const Edges = () => {
   const queryClient = useQueryClient();
 
   const [page, setPage] = useState(0);
-  const [typeFilter, setTypeFilter] = useState<string>("");
+  const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES_VALUE);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   
   // Form state
@@ -89,7 +90,7 @@ const Edges = () => {
       edgesApi.list({
         limit: ITEMS_PER_PAGE,
         offset: page * ITEMS_PER_PAGE,
-        type: typeFilter || undefined,
+        type: typeFilter === ALL_TYPES_VALUE ? undefined : typeFilter,
       }),
     retry: 1,
   });
@@ -255,7 +256,7 @@ const Edges = () => {
                 <SelectValue placeholder="All Types" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All Types</SelectItem>
+                <SelectItem value={ALL_TYPES_VALUE}>All Types</SelectItem>
                 {EDGE_TYPES.map((type) => (
                   <SelectItem key={type} value={type}>
                     {type}

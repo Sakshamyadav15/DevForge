@@ -66,6 +66,7 @@ import {
 import type { Node, NodeCreate, NodeUpdate, NeighborsResponse } from "@/types";
 
 const ITEMS_PER_PAGE = 10;
+const ALL_TOPICS_VALUE = "__all_topics__";
 
 const Nodes = () => {
   const { toast } = useToast();
@@ -73,7 +74,7 @@ const Nodes = () => {
   
   // State
   const [page, setPage] = useState(0);
-  const [topicFilter, setTopicFilter] = useState<string>("");
+  const [topicFilter, setTopicFilter] = useState<string>(ALL_TOPICS_VALUE);
   const [searchTerm, setSearchTerm] = useState("");
   
   // Dialog states
@@ -101,7 +102,7 @@ const Nodes = () => {
       nodesApi.list({
         limit: ITEMS_PER_PAGE,
         offset: page * ITEMS_PER_PAGE,
-        topic: topicFilter || undefined,
+        topic: topicFilter === ALL_TOPICS_VALUE ? undefined : topicFilter,
       }),
     retry: 1,
   });
@@ -347,7 +348,7 @@ const Nodes = () => {
                 <SelectValue placeholder="All Topics" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All Topics</SelectItem>
+                <SelectItem value={ALL_TOPICS_VALUE}>All Topics</SelectItem>
                 <SelectItem value="arxiv">ArXiv</SelectItem>
                 <SelectItem value="pubmed">PubMed</SelectItem>
                 <SelectItem value="research">Research</SelectItem>
