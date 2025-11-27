@@ -136,15 +136,20 @@ async def list_nodes(
         if offset is not None:
             page = (offset // page_size) + 1
         
+        all_nodes = []
+        
         # Try graph store first, fall back to snapshot
-        if graph_store:
-            all_nodes = graph_store.get_all_nodes()
-        else:
-            # Fall back to snapshot if Neo4j not available
-            snapshot_nodes = snapshot_manager.get_all_nodes() if snapshot_manager else {}
-            all_nodes = []
+        if graph_store is not None:
+            try:
+                all_nodes = graph_store.get_all_nodes()
+            except Exception as e:
+                logger.warning(f"Graph store failed, falling back to snapshot: {e}")
+                graph_store_failed = True
+        
+        # Fall back to snapshot if Neo4j not available or failed
+        if not all_nodes and snapshot_manager:
+            snapshot_nodes = snapshot_manager.get_all_nodes()
             for node_id, node_data in snapshot_nodes.items():
-                from app.models.graph import Node
                 all_nodes.append(Node(
                     id=node_id,
                     text=node_data.get("text", ""),
@@ -207,7 +212,8 @@ async def list_nodes(
 async def get_node(
     node_id: str,
     include_neighbors: bool = Query(default=True, description="Include direct neighbors"),
-    graph_store=Depends(get_graph_store)
+    graph_store=Depends(get_graph_store),
+    snapshot_manager=Depends(get_snapshot_manager)
 ) -> NodeWithNeighbors:
     """
     Get a node by ID with optional neighbor information.
@@ -222,30 +228,47 @@ async def get_node(
     Raises:
         HTTPException 404: If node not found
     """
-    node = graph_store.get_node(node_id)
-    
-    if not node:
-        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
-    
+    node = None
     neighbors = []
     edge_count = 0
     
-    if include_neighbors:
-        # Get edges and extract neighbor nodes
-        edges = graph_store.get_edges_for_node(node_id)
-        edge_count = len(edges)
-        
-        neighbor_ids = set()
-        for edge in edges:
-            if edge.source_id == node_id:
-                neighbor_ids.add(edge.target_id)
-            else:
-                neighbor_ids.add(edge.source_id)
-        
-        for neighbor_id in neighbor_ids:
-            neighbor_node = graph_store.get_node(neighbor_id)
-            if neighbor_node:
-                neighbors.append(neighbor_node)
+    # Try graph store first
+    if graph_store is not None:
+        try:
+            node = graph_store.get_node(node_id)
+            if node and include_neighbors:
+                edges = graph_store.get_edges_for_node(node_id)
+                edge_count = len(edges)
+                
+                neighbor_ids = set()
+                for edge in edges:
+                    if edge.source_id == node_id:
+                        neighbor_ids.add(edge.target_id)
+                    else:
+                        neighbor_ids.add(edge.source_id)
+                
+                for neighbor_id in neighbor_ids:
+                    neighbor_node = graph_store.get_node(neighbor_id)
+                    if neighbor_node:
+                        neighbors.append(neighbor_node)
+        except Exception as e:
+            logger.warning(f"Graph store failed: {e}")
+    
+    # Fall back to snapshot if graph store failed or unavailable
+    if node is None and snapshot_manager:
+        node_data = snapshot_manager.get_node(node_id)
+        if node_data:
+            node = Node(
+                id=node_id,
+                text=node_data.get("text", ""),
+                metadata=node_data.get("metadata", {}),
+                created_at=node_data.get("created_at"),
+                updated_at=node_data.get("updated_at")
+            )
+            # No neighbor info from snapshot in this simple case
+    
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
     
     return NodeWithNeighbors(
         id=node.id,

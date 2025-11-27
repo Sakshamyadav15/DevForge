@@ -90,15 +90,15 @@ const Overview = () => {
           title="Index Size"
           value={
             stats?.vector_index_size
-              ? `${(stats.vector_index_size / 1024 / 1024).toFixed(1)} MB`
+              ? `${stats.vector_index_size.toLocaleString()}`
               : "N/A"
           }
           icon={HardDrive}
-          description="Vector storage"
+          description="Vectors indexed"
         />
         <StatCard
           title="Avg Degree"
-          value={stats?.graph_degree_avg?.toFixed(2) || "N/A"}
+          value={stats?.avg_degree?.toFixed(2) || "N/A"}
           icon={GitBranch}
           description="Connections per node"
         />

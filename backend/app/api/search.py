@@ -280,18 +280,22 @@ async def hybrid_search(
 @router.post(
     "/hybrid/simple",
     summary="Hybrid search (frontend-compatible)",
-    description="Simplified hybrid search endpoint matching frontend expectations."
+    description="Simplified hybrid search endpoint matching frontend expectations. Falls back to vector-only search if Neo4j is unavailable."
 )
 async def hybrid_search_simple(
     request: dict,
     hybrid_engine=Depends(get_hybrid_engine),
-    graph_store=Depends(get_graph_store)
+    graph_store=Depends(get_graph_store),
+    vector_store=Depends(get_vector_store),
+    embedding_service=Depends(get_embedding_service)
 ):
     """
     Frontend-compatible hybrid search.
     
     Accepts: {query, vector_weight?, graph_weight?, top_k?, filters?: {topic?, category?}}
     Returns: {results: [{id, text_snippet, score, vector_score, graph_score, neighbors, metadata}]}
+    
+    Falls back to vector-only search if Neo4j/hybrid_engine is unavailable.
     """
     try:
         query = request.get("query") or request.get("query_text", "")
@@ -299,36 +303,73 @@ async def hybrid_search_simple(
             raise HTTPException(status_code=400, detail="Query is required")
         
         top_k = request.get("top_k", 10)
-        vector_weight = request.get("vector_weight")
-        graph_weight = request.get("graph_weight")
+        vector_weight = request.get("vector_weight", 0.7)
+        graph_weight = request.get("graph_weight", 0.3)
         filters = request.get("filters", {})
         topic_filter = filters.get("topic")
         
-        response = hybrid_engine.hybrid_search(
-            query_text=query,
-            top_k=top_k,
-            vector_weight=vector_weight,
-            graph_weight=graph_weight,
-            topic_filter=topic_filter
-        )
-        
-        # Transform to frontend format
         results = []
-        for r in response.results:
-            # Get neighbor count
-            edges = graph_store.get_edges_for_node(r.node.id) if graph_store else []
-            neighbor_count = len(edges)
+        
+        # Use hybrid engine if available, otherwise fall back to vector-only
+        if hybrid_engine is not None:
+            response = hybrid_engine.hybrid_search(
+                query_text=query,
+                top_k=top_k,
+                vector_weight=vector_weight,
+                graph_weight=graph_weight,
+                topic_filter=topic_filter
+            )
             
-            results.append({
-                "id": r.node.id,
-                "title": r.node.metadata.get("title"),
-                "text_snippet": r.node.text[:300] + "..." if len(r.node.text) > 300 else r.node.text,
-                "score": round(r.final_score, 4),
-                "vector_score": round(r.cosine_similarity, 4),
-                "graph_score": round(r.graph_score, 4),
-                "neighbors": neighbor_count,
-                "metadata": r.node.metadata
-            })
+            # Transform to frontend format
+            for r in response.results:
+                # Get neighbor count
+                edges = graph_store.get_edges_for_node(r.node.id) if graph_store else []
+                neighbor_count = len(edges)
+                
+                results.append({
+                    "id": r.node.id,
+                    "title": r.node.metadata.get("title"),
+                    "text_snippet": r.node.text[:300] + "..." if len(r.node.text) > 300 else r.node.text,
+                    "score": round(r.final_score, 4),
+                    "vector_score": round(r.cosine_similarity, 4),
+                    "graph_score": round(r.graph_score, 4),
+                    "neighbors": neighbor_count,
+                    "metadata": r.node.metadata
+                })
+        else:
+            # Fallback: Vector-only search using snapshot data
+            from app.main import snapshot_manager
+            
+            # Embed query
+            query_embedding = embedding_service.embed(query)
+            
+            # Search FAISS
+            faiss_results = vector_store.search(query_embedding, top_k=top_k * 2)
+            
+            # Get node details from snapshot
+            snapshot = snapshot_manager.load_snapshot()
+            nodes_by_id = {n["id"]: n for n in snapshot.get("nodes", [])}
+            
+            for node_id, distance in faiss_results[:top_k]:
+                node_data = nodes_by_id.get(node_id)
+                if node_data:
+                    # Apply topic filter if specified
+                    if topic_filter and node_data.get("metadata", {}).get("topic") != topic_filter:
+                        continue
+                    
+                    text = node_data.get("text", "")
+                    cosine_sim = 1.0 - distance  # Convert distance to similarity
+                    
+                    results.append({
+                        "id": node_id,
+                        "title": node_data.get("metadata", {}).get("title"),
+                        "text_snippet": text[:300] + "..." if len(text) > 300 else text,
+                        "score": round(cosine_sim, 4),
+                        "vector_score": round(cosine_sim, 4),
+                        "graph_score": 0.0,  # No graph available
+                        "neighbors": 0,
+                        "metadata": node_data.get("metadata", {})
+                    })
         
         return {"results": results}
         

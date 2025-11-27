@@ -281,12 +281,26 @@ async def get_stats():
         mtime = snapshot_manager.snapshot_path.stat().st_mtime
         snapshot_updated = datetime.fromtimestamp(mtime).isoformat()
     
+    # Get aggregated stats from snapshot
+    aggregated = snapshot_manager.get_aggregated_stats() if snapshot_manager else {}
+    
     return {
         # Frontend-compatible fields
         "nodes": snapshot_manager.get_node_count() if snapshot_manager else 0,
         "edges": snapshot_manager.get_edge_count() if snapshot_manager else 0,
         "snapshot_last_updated": snapshot_updated,
         "vector_index_size": len(vector_store) if vector_store else 0,
+        # Aggregated distributions for charts
+        "topic_distribution": aggregated.get("topic_distribution", []),
+        "category_distribution": aggregated.get("category_distribution", []),
+        "source_distribution": aggregated.get("source_distribution", []),
+        "edge_type_distribution": aggregated.get("edge_type_distribution", []),
+        # Computed metrics
+        "avg_edge_weight": aggregated.get("avg_edge_weight", 0),
+        "avg_degree": aggregated.get("avg_degree", 0),
+        "unique_topics": aggregated.get("unique_topics", 0),
+        "unique_categories": aggregated.get("unique_categories", 0),
+        "unique_sources": aggregated.get("unique_sources", 0),
         # Extended info
         "embedding": {
             "model": settings.embedding_model_name if not embedding_service.is_mock else "mock",

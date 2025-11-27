@@ -8,6 +8,24 @@ export interface Node {
   metadata?: Record<string, any>;
 }
 
+export interface NodeCreate {
+  text: string;
+  metadata?: {
+    title?: string;
+    topic?: string;
+    category?: string;
+    source?: string;
+    [key: string]: any;
+  };
+  id?: string;
+}
+
+export interface NodeUpdate {
+  text?: string;
+  metadata?: Record<string, any>;
+  regenerate_embedding?: boolean;
+}
+
 export interface Edge {
   id: string;
   source: string;
@@ -18,7 +36,27 @@ export interface Edge {
   created_at: string;
 }
 
+export interface EdgeCreate {
+  source_id: string;
+  target_id: string;
+  type: string;
+  weight?: number;
+}
+
 export interface SearchResult {
+  // Simplified format from /hybrid/simple endpoint
+  id: string;
+  title?: string;
+  text_snippet: string;
+  score: number;
+  vector_score: number;
+  graph_score: number;
+  neighbors: number;
+  metadata?: Record<string, any>;
+}
+
+// Legacy format from /hybrid endpoint (if needed)
+export interface DetailedSearchResult {
   node: Node;
   cosine_similarity: number;
   cosine_normalized: number;
@@ -31,12 +69,38 @@ export interface SearchResult {
   avg_edge_weight: number;
 }
 
+export interface ChartDataItem {
+  name: string;
+  value?: number;
+  count?: number;
+}
+
 export interface Stats {
   nodes: number;
   edges: number;
   snapshot_last_updated: string;
   vector_index_size?: number;
-  graph_degree_avg?: number;
+  // Aggregated distributions
+  topic_distribution: ChartDataItem[];
+  category_distribution: ChartDataItem[];
+  source_distribution: ChartDataItem[];
+  edge_type_distribution: ChartDataItem[];
+  // Computed metrics
+  avg_edge_weight: number;
+  avg_degree: number;
+  unique_topics: number;
+  unique_categories: number;
+  unique_sources: number;
+  // Extended info
+  embedding?: {
+    model: string;
+    dimension: number;
+  };
+  config?: {
+    neo4j_uri: string;
+    auto_rebuild: boolean;
+    log_level: string;
+  };
 }
 
 export interface HealthStatus {
@@ -56,6 +120,48 @@ export interface SearchRequest {
   graph_weight?: number;
   source_filter?: string;
   topic_filter?: string;
+}
+
+export interface VectorSearchRequest {
+  query_text: string;
+  top_k?: number;
+  source_filter?: string;
+  topic_filter?: string;
+}
+
+export interface GraphSearchRequest {
+  start_id: string;
+  depth?: number;
+  max_nodes?: number;
+}
+
+// Graph traversal node from backend GraphSearchResponse
+export interface GraphTraversalNode {
+  node: Node;
+  hop_distance: number;
+  path_weight: number;
+}
+
+// Actual backend GraphSearchResponse structure
+export interface GraphSearchResult {
+  start_node: Node;
+  traversed_nodes: GraphTraversalNode[];
+  total_nodes: number;
+  max_depth_reached: number;
+}
+
+// Vector search response from backend
+export interface VectorSearchResult {
+  node: Node;
+  cosine_similarity: number;
+  rank: number;
+}
+
+export interface VectorSearchResponse {
+  query_text: string;
+  results: VectorSearchResult[];
+  total_results: number;
+  search_time_ms: number;
 }
 
 export interface NeighborsResponse {

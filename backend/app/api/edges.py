@@ -133,18 +133,23 @@ async def list_edges(
         if offset is not None:
             page = (offset // page_size) + 1
         
+        all_edges = []
+        
         # Try graph store first, fall back to snapshot
-        if graph_store:
-            all_edges = graph_store.get_all_edges()
-        else:
-            snapshot_edges = snapshot_manager.get_all_edges() if snapshot_manager else []
-            all_edges = []
-            from app.models.graph import Edge
+        if graph_store is not None:
+            try:
+                all_edges = graph_store.get_all_edges()
+            except Exception as e:
+                logger.warning(f"Graph store failed, falling back to snapshot: {e}")
+        
+        # Fall back to snapshot if Neo4j not available or failed
+        if not all_edges and snapshot_manager:
+            snapshot_edges = snapshot_manager.get_all_edges()
             for edge_data in snapshot_edges:
                 all_edges.append(Edge(
-                    id=f"{edge_data.get('source')}_{edge_data.get('target')}_{edge_data.get('type')}",
-                    source_id=edge_data.get("source"),
-                    target_id=edge_data.get("target"),
+                    id=edge_data.get("id", f"{edge_data.get('source_id')}_{edge_data.get('target_id')}_{edge_data.get('type')}"),
+                    source_id=edge_data.get("source_id"),
+                    target_id=edge_data.get("target_id"),
                     type=edge_data.get("type", "RELATED_TO"),
                     weight=edge_data.get("weight", 1.0)
                 ))

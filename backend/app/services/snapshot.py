@@ -558,6 +558,106 @@ class SnapshotManager:
             self.load_snapshot()
         return len(self._cache.edges)
     
+    def get_all_nodes(self) -> dict[str, dict[str, Any]]:
+        """
+        Get all nodes from the snapshot.
+        
+        Returns:
+            Dictionary mapping node_id -> node data
+        """
+        if self._cache is None:
+            self.load_snapshot()
+        return self._cache.nodes.copy()
+    
+    def get_all_edges(self) -> list[dict[str, Any]]:
+        """
+        Get all edges from the snapshot.
+        
+        Returns:
+            List of edge data dictionaries
+        """
+        if self._cache is None:
+            self.load_snapshot()
+        return self._cache.edges.copy()
+    
+    def get_node(self, node_id: str) -> Optional[dict[str, Any]]:
+        """
+        Get a single node by ID from the snapshot.
+        
+        Args:
+            node_id: The node ID to look up
+            
+        Returns:
+            Node data dictionary, or None if not found
+        """
+        if self._cache is None:
+            self.load_snapshot()
+        return self._cache.nodes.get(node_id)
+    
     def get_cached_data(self) -> Optional[SnapshotData]:
         """Get the cached snapshot data (may be None if not loaded)."""
         return self._cache
+
+    def get_aggregated_stats(self) -> dict[str, Any]:
+        """
+        Get aggregated statistics about the data.
+        
+        Returns topic distribution, category distribution, edge type distribution,
+        and other useful metrics for the Stats page.
+        """
+        if self._cache is None:
+            self.load_snapshot()
+        
+        # Topic distribution
+        topic_counts: dict[str, int] = {}
+        category_counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        
+        for node_id, node_data in self._cache.nodes.items():
+            metadata = node_data.get("metadata", {})
+            
+            # Count topics
+            topic = metadata.get("topic", "unknown")
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            
+            # Count categories
+            category = metadata.get("category", "unknown")
+            category_counts[category] = category_counts.get(category, 0) + 1
+            
+            # Count sources
+            source = metadata.get("source", "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+        
+        # Edge type distribution
+        edge_type_counts: dict[str, int] = {}
+        total_weight = 0.0
+        for edge in self._cache.edges:
+            edge_type = edge.get("type", "unknown")
+            edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
+            total_weight += edge.get("weight", 0.0)
+        
+        # Calculate average edge weight
+        avg_edge_weight = total_weight / len(self._cache.edges) if self._cache.edges else 0.0
+        
+        # Calculate average degree (edges per node)
+        avg_degree = (len(self._cache.edges) * 2) / len(self._cache.nodes) if self._cache.nodes else 0.0
+        
+        return {
+            "topic_distribution": [
+                {"name": k, "value": v} for k, v in sorted(topic_counts.items(), key=lambda x: -x[1])
+            ],
+            "category_distribution": [
+                {"name": k, "count": v} for k, v in sorted(category_counts.items(), key=lambda x: -x[1])
+            ],
+            "source_distribution": [
+                {"name": k, "count": v} for k, v in sorted(source_counts.items(), key=lambda x: -x[1])
+            ],
+            "edge_type_distribution": [
+                {"name": k, "count": v} for k, v in sorted(edge_type_counts.items(), key=lambda x: -x[1])
+            ],
+            "avg_edge_weight": round(avg_edge_weight, 4),
+            "avg_degree": round(avg_degree, 2),
+            "unique_topics": len(topic_counts),
+            "unique_categories": len(category_counts),
+            "unique_sources": len(source_counts),
+        }
