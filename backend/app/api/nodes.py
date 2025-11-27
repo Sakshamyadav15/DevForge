@@ -115,8 +115,8 @@ async def create_node(
 )
 async def list_nodes(
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(default=10, ge=1, le=100, description="Items per page"),
-    limit: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page (alias for page_size)"),
+    page_size: int = Query(default=10, ge=1, le=500, description="Items per page"),
+    limit: Optional[int] = Query(default=None, ge=1, le=500, description="Items per page (alias for page_size)"),
     offset: Optional[int] = Query(default=None, ge=0, description="Offset (alternative to page)"),
     source: Optional[str] = Query(default=None, description="Filter by source metadata"),
     topic: Optional[str] = Query(default=None, description="Filter by topic metadata"),

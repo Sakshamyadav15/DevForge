@@ -140,7 +140,7 @@ async def vector_search(
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
-@router.get(
+@router.post(
     "/graph",
     response_model=GraphSearchResponse,
     summary="Graph traversal search",
@@ -159,18 +159,14 @@ async def vector_search(
     """
 )
 async def graph_search(
-    start_id: str = Query(..., description="ID of the starting node"),
-    depth: int = Query(default=1, ge=1, le=5, description="Maximum traversal depth"),
-    edge_type: Optional[str] = Query(default=None, description="Filter by edge type"),
+    request: GraphSearchRequest,
     graph_store=Depends(get_graph_store)
 ) -> GraphSearchResponse:
     """
     Perform graph traversal from a starting node.
     
     Args:
-        start_id: The node ID to start traversal from
-        depth: Maximum number of hops (1-5)
-        edge_type: Optional filter to traverse only certain edge types
+        request: GraphSearchRequest with start_id, depth, edge_type_filter
         
     Returns:
         GraphSearchResponse with traversed nodes and distances
@@ -179,13 +175,17 @@ async def graph_search(
         HTTPException 404: If start node not found
     """
     try:
+        start_id = request.start_id
+        depth = request.depth or 1
+        edge_type_filter = request.edge_type_filter
+        
         # Verify start node exists
         start_node = graph_store.get_node(start_id)
         if not start_node:
             raise HTTPException(status_code=404, detail=f"Start node '{start_id}' not found")
         
-        # Perform traversal with distances
-        traversal_results = graph_store.traverse_with_distances(start_id, depth)
+        # Perform traversal with distances (supports edge type filtering)
+        traversal_results = graph_store.traverse_with_distances(start_id, depth, edge_type_filter)
         
         # Build response
         traversed_nodes = []
@@ -216,61 +216,473 @@ async def graph_search(
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
+# =============================================================================
+# Graph-Only Search Options (without needing to know a node ID)
+# =============================================================================
+
+@router.get(
+    "/graph/by-topic",
+    summary="Find nodes by topic and explore",
+    description="""
+    Find nodes by topic, then optionally explore their graph neighborhood.
+    This is useful when you want to explore a topic area without knowing specific node IDs.
+    """
+)
+async def graph_search_by_topic(
+    topic: str = Query(..., description="Topic to search for (e.g., 'machine_learning')"),
+    limit: int = Query(default=10, ge=1, le=50, description="Max nodes to return"),
+    include_neighbors: bool = Query(default=False, description="Include 1-hop neighbors"),
+    graph_store=Depends(get_graph_store)
+):
+    """Find nodes by topic and optionally include neighbors."""
+    try:
+        # Query Neo4j for nodes with this topic
+        query = """
+        MATCH (n:Node)
+        WHERE n.topic = $topic
+        RETURN n
+        LIMIT $limit
+        """
+        
+        result = graph_store._execute_query(query, {"topic": topic, "limit": limit})
+        
+        nodes = []
+        for record in result:
+            node_data = dict(record["n"])
+            node = graph_store._record_to_node(node_data)
+            nodes.append({
+                "node": {
+                    "id": node.id,
+                    "text": node.text,
+                    "topic": node.metadata.get("topic"),
+                    "category": node.metadata.get("category"),
+                    "metadata": node.metadata
+                },
+                "neighbors": []
+            })
+            
+            # Get neighbors if requested
+            if include_neighbors:
+                neighbor_query = """
+                MATCH (n:Node {id: $node_id})-[r]-(m:Node)
+                RETURN m, type(r) as rel_type
+                LIMIT 5
+                """
+                neighbor_result = graph_store._execute_query(neighbor_query, {"node_id": node.id})
+                for nr in neighbor_result:
+                    neighbor_node = dict(nr["m"])
+                    nodes[-1]["neighbors"].append({
+                        "id": neighbor_node.get("id"),
+                        "topic": neighbor_node.get("topic"),
+                        "relationship": nr["rel_type"]
+                    })
+        
+        return {
+            "topic": topic,
+            "nodes_found": len(nodes),
+            "results": nodes
+        }
+        
+    except Exception as e:
+        logger.error(f"Topic search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get(
+    "/graph/central-nodes",
+    summary="Find most connected nodes",
+    description="""
+    Find the most connected (central) nodes in the graph.
+    These are good starting points for exploration.
+    Ranking is based on degree (number of connections).
+    """
+)
+async def get_central_nodes(
+    limit: int = Query(default=10, ge=1, le=50, description="Number of nodes to return"),
+    topic: Optional[str] = Query(default=None, description="Filter by topic"),
+    graph_store=Depends(get_graph_store)
+):
+    """Get the most connected nodes in the graph."""
+    try:
+        # Query for nodes with highest degree
+        if topic:
+            query = """
+            MATCH (n:Node)
+            WHERE n.topic = $topic
+            WITH n, size((n)--()) as degree
+            ORDER BY degree DESC
+            LIMIT $limit
+            RETURN n, degree
+            """
+            params = {"topic": topic, "limit": limit}
+        else:
+            query = """
+            MATCH (n:Node)
+            WITH n, size((n)--()) as degree
+            ORDER BY degree DESC
+            LIMIT $limit
+            RETURN n, degree
+            """
+            params = {"limit": limit}
+        
+        result = graph_store._execute_query(query, params)
+        
+        nodes = []
+        for record in result:
+            node_data = dict(record["n"])
+            nodes.append({
+                "id": node_data.get("id"),
+                "text": node_data.get("text", "")[:200] + "..." if len(node_data.get("text", "")) > 200 else node_data.get("text", ""),
+                "topic": node_data.get("topic"),
+                "category": node_data.get("category"),
+                "degree": record["degree"],
+                "metadata": {
+                    k: v for k, v in node_data.items() 
+                    if k not in ["id", "text", "topic", "category"]
+                }
+            })
+        
+        return {
+            "description": "Most connected nodes in the graph",
+            "filter_topic": topic,
+            "results": nodes
+        }
+        
+    except Exception as e:
+        logger.error(f"Central nodes search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get(
+    "/graph/search",
+    summary="Graph-only search (NO vectors)",
+    description="""
+    Perform graph-only search using Neo4j without any vector/embedding involvement.
+    
+    **How it works:**
+    1. Filter nodes by topic (optional)
+    2. Find nodes whose text contains the query_text (keyword match)
+    3. Use matching nodes as starting points for graph traversal
+    4. Explore up to `depth` hops from each matched node
+    5. Rank results by graph metrics (degree, path weight)
+    
+    This is PURE GRAPH search - no FAISS, no embeddings.
+    """
+)
+async def graph_only_search(
+    query_text: str = Query(default="", description="Keyword to search for in node text"),
+    topic: Optional[str] = Query(default=None, description="Filter by topic"),
+    depth: int = Query(default=2, ge=1, le=4, description="Traversal depth from matched nodes"),
+    top_k: int = Query(default=10, ge=1, le=50, description="Number of results to return"),
+    graph_store=Depends(get_graph_store)
+):
+    """
+    Graph-only search: Find nodes by keyword/topic, then traverse their neighborhoods.
+    """
+    try:
+        matched_nodes = []
+        matched_ids = set()
+        traversed_nodes = []
+        
+        # Use the graph_store's session context manager
+        with graph_store._session() as session:
+            # Step 1: Find starting nodes (by topic and/or keyword)
+            # Using COUNT{} instead of size() for Neo4j 5.x compatibility
+            if topic and query_text:
+                match_query = """
+                MATCH (n:Node)
+                WHERE n.topic = $topic AND toLower(n.text) CONTAINS toLower($query_text)
+                RETURN n, 0 as hop_distance, COUNT { (n)--() } as degree
+                """
+                params = {"topic": topic, "query_text": query_text}
+            elif topic:
+                match_query = """
+                MATCH (n:Node)
+                WHERE n.topic = $topic
+                RETURN n, 0 as hop_distance, COUNT { (n)--() } as degree
+                """
+                params = {"topic": topic}
+            elif query_text:
+                match_query = """
+                MATCH (n:Node)
+                WHERE toLower(n.text) CONTAINS toLower($query_text)
+                RETURN n, 0 as hop_distance, COUNT { (n)--() } as degree
+                """
+                params = {"query_text": query_text}
+            else:
+                match_query = """
+                MATCH (n:Node)
+                WITH n, COUNT { (n)--() } as degree
+                ORDER BY degree DESC
+                LIMIT 20
+                RETURN n, 0 as hop_distance, degree
+                """
+                params = {}
+            
+            # Execute first query
+            result = session.run(match_query, params)
+            for record in result:
+                node_data = dict(record["n"])
+                node_id = node_data.get("id")
+                if node_id and node_id not in matched_ids:
+                    matched_ids.add(node_id)
+                    matched_nodes.append({
+                        "id": node_id,
+                        "text": node_data.get("text", ""),
+                        "topic": node_data.get("topic"),
+                        "hop_distance": 0,
+                        "degree": record["degree"],
+                        "is_direct_match": True
+                    })
+            
+            # Step 2: Traverse from matched nodes if depth > 1
+            if depth > 1 and matched_nodes:
+                matched_id_list = list(matched_ids)[:10]
+                
+                traverse_query = f"""
+                MATCH (start:Node)
+                WHERE start.id IN $start_ids
+                MATCH path = (start)-[:RELATION*1..{depth - 1}]-(neighbor:Node)
+                WHERE NOT neighbor.id IN $start_ids
+                WITH neighbor, 
+                     min(length(path)) as hop_distance,
+                     COUNT {{ (neighbor)--() }} as degree
+                RETURN DISTINCT neighbor, hop_distance, degree
+                ORDER BY hop_distance, degree DESC
+                """
+                
+                result = session.run(traverse_query, {"start_ids": matched_id_list})
+                seen_ids = set(matched_ids)
+                for record in result:
+                    neighbor_data = dict(record["neighbor"])
+                    neighbor_id = neighbor_data.get("id")
+                    if neighbor_id and neighbor_id not in seen_ids:
+                        seen_ids.add(neighbor_id)
+                        traversed_nodes.append({
+                            "id": neighbor_id,
+                            "text": neighbor_data.get("text", ""),
+                            "topic": neighbor_data.get("topic"),
+                            "hop_distance": record["hop_distance"],
+                            "degree": record["degree"],
+                            "is_direct_match": False
+                        })
+        
+        # Step 3: Combine and rank
+        all_nodes = matched_nodes + traversed_nodes
+        
+        # Compute graph-based scores
+        max_degree = max((n["degree"] for n in all_nodes), default=1) or 1
+        
+        for node in all_nodes:
+            match_bonus = 1.0 if node["is_direct_match"] else 0.0
+            degree_score = node["degree"] / max_degree
+            hop_penalty = 1.0 / (1 + node["hop_distance"])
+            node["graph_score"] = round(0.4 * match_bonus + 0.3 * degree_score + 0.3 * hop_penalty, 4)
+            
+            text = node["text"]
+            node["text_snippet"] = text[:200] + "..." if len(text) > 200 else text
+            del node["text"]
+        
+        all_nodes.sort(key=lambda x: (-x["graph_score"], x["hop_distance"]))
+        results = all_nodes[:top_k]
+        
+        return {
+            "search_type": "graph_only",
+            "query_text": query_text or None,
+            "topic_filter": topic,
+            "depth": depth,
+            "direct_matches": len(matched_nodes),
+            "traversed_found": len(traversed_nodes),
+            "total_results": len(results),
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Graph-only search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get(
+    "/graph/keyword",
+    summary="Find nodes containing keywords (graph-only)",
+    description="""
+    Search for nodes containing specific keywords in their text.
+    This is a TEXT search in Neo4j (not semantic/vector search).
+    Use this to find starting points for graph traversal.
+    """
+)
+async def graph_keyword_search(
+    keyword: str = Query(..., description="Keyword to search for"),
+    limit: int = Query(default=10, ge=1, le=50, description="Max nodes to return"),
+    include_neighbors: bool = Query(default=True, description="Include neighbor count"),
+    graph_store=Depends(get_graph_store)
+):
+    """Search nodes by keyword in their text (case-insensitive)."""
+    try:
+        # Use CONTAINS for keyword search (case-insensitive)
+        query = """
+        MATCH (n:Node)
+        WHERE toLower(n.text) CONTAINS toLower($keyword)
+        WITH n, size((n)--()) as degree
+        ORDER BY degree DESC
+        LIMIT $limit
+        RETURN n, degree
+        """
+        
+        result = graph_store._execute_query(query, {"keyword": keyword, "limit": limit})
+        
+        nodes = []
+        for record in result:
+            node_data = dict(record["n"])
+            text = node_data.get("text", "")
+            
+            # Highlight keyword in text
+            text_lower = text.lower()
+            keyword_lower = keyword.lower()
+            start_idx = text_lower.find(keyword_lower)
+            
+            if start_idx != -1:
+                # Extract snippet around keyword
+                snippet_start = max(0, start_idx - 50)
+                snippet_end = min(len(text), start_idx + len(keyword) + 100)
+                snippet = ("..." if snippet_start > 0 else "") + text[snippet_start:snippet_end] + ("..." if snippet_end < len(text) else "")
+            else:
+                snippet = text[:150] + "..." if len(text) > 150 else text
+            
+            nodes.append({
+                "id": node_data.get("id"),
+                "text_snippet": snippet,
+                "topic": node_data.get("topic"),
+                "category": node_data.get("category"),
+                "degree": record["degree"] if include_neighbors else None
+            })
+        
+        return {
+            "keyword": keyword,
+            "nodes_found": len(nodes),
+            "note": "This is keyword search (exact match), not semantic search. Use /search/vector for semantic similarity.",
+            "results": nodes
+        }
+        
+    except Exception as e:
+        logger.error(f"Keyword search failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get(
+    "/graph/topics",
+    summary="List all topics in the graph",
+    description="Get a list of all unique topics and their node counts. Useful for browsing."
+)
+async def list_graph_topics(
+    graph_store=Depends(get_graph_store)
+):
+    """Get all unique topics with counts."""
+    try:
+        query = """
+        MATCH (n:Node)
+        WHERE n.topic IS NOT NULL
+        RETURN n.topic as topic, count(*) as count
+        ORDER BY count DESC
+        """
+        
+        result = graph_store._execute_query(query, {})
+        
+        topics = [{"topic": record["topic"], "count": record["count"]} for record in result]
+        
+        return {
+            "total_topics": len(topics),
+            "topics": topics
+        }
+        
+    except Exception as e:
+        logger.error(f"List topics failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list topics: {str(e)}")
+
+
 @router.post(
     "/hybrid",
-    response_model=HybridSearchResponse,
-    summary="Hybrid search (vector + graph)",
+    summary="Hybrid search (vector + graph) with adaptive weights",
     description="""
     Perform hybrid search combining vector similarity and graph signals.
     
-    This is the key innovation of the system. It demonstrates that
-    combining semantic search with graph structure produces better
-    results than either approach alone.
+    **ADAPTIVE WEIGHTS** - Backend decides weights automatically:
+    - If query contains relationship keywords (between, connected, path, etc.) → graph_weight=0.6, vector_weight=0.4
+    - Otherwise → vector_weight=0.7, graph_weight=0.3
     
     **How it works:**
-    1. Embed the query and get semantic candidates from FAISS
-    2. For each candidate, compute graph-based scores from Neo4j
-    3. Normalize both score types
-    4. Combine: `final_score = α × cosine_norm + β × graph_norm`
-    5. Re-rank and return top results
+    1. Embed query, search FAISS for top candidate_k nodes
+    2. For each candidate, compute graph score from Neo4j (degree, edge weights, topic connections)
+    3. Normalize cosine & graph scores to 0-1 range
+    4. Compute final_score = vector_weight × norm_cosine + graph_weight × norm_graph
+    5. Sort by final_score, return top_k results
     
-    **Adaptive Weights:**
-    If vector_weight and graph_weight are not provided, the system
-    automatically detects query intent:
-    - Relationship queries ("connection between X and Y") → more graph weight
-    - General queries → more vector weight
+    **Request:**
+    ```json
+    {
+      "query_text": "AI in healthcare",
+      "top_k": 10,
+      "candidate_k": 30
+    }
+    ```
     
-    **Response includes:**
-    - Full scoring breakdown for each result
-    - `vector_only_rank` to show how ranking changed from vector-only
-    - `ranking_changed` flag indicating if hybrid improved ranking
+    **Response:** Array of results with full scoring breakdown.
     """
 )
 async def hybrid_search(
     request: HybridSearchRequest,
-    hybrid_engine=Depends(get_hybrid_engine)
-) -> HybridSearchResponse:
+    hybrid_engine=Depends(get_hybrid_engine),
+    graph_store=Depends(get_graph_store)
+):
     """
-    Perform hybrid search combining vector and graph signals.
+    Perform hybrid search with adaptive weights.
     
     Args:
-        request: HybridSearchRequest with query and optional weights
+        request: HybridSearchRequest with query_text, top_k, candidate_k
         
     Returns:
-        HybridSearchResponse with detailed scoring breakdown
+        List of results with id, text, topic, metadata, cosine_sim, graph_score, final_score
     """
     try:
+        # Use hybrid engine with NO explicit weights - it will use adaptive weights
         response = hybrid_engine.hybrid_search(
             query_text=request.query_text,
             top_k=request.top_k,
             candidate_k=request.candidate_k,
-            vector_weight=request.vector_weight,
-            graph_weight=request.graph_weight,
-            source_filter=request.source_filter,
-            topic_filter=request.topic_filter
+            vector_weight=None,  # Force adaptive
+            graph_weight=None    # Force adaptive
         )
         
-        return response
+        # Transform to the required JSON format
+        results = []
+        for r in response.results:
+            # Get additional metadata
+            node_metadata = r.node.metadata if r.node.metadata else {}
+            topic = node_metadata.get("topic") or r.node.topic
+            
+            results.append({
+                "id": r.node.id,
+                "text": r.node.text,
+                "topic": topic,
+                "metadata": node_metadata,
+                "cosine_sim": round(r.cosine_similarity, 4),
+                "graph_score": round(r.graph_normalized, 4),  # Use normalized for comparability
+                "final_score": round(r.final_score, 4),
+                "rank": r.rank,
+                "vector_only_rank": r.vector_only_rank,
+                "degree": r.degree
+            })
+        
+        return {
+            "query_text": request.query_text,
+            "total_results": len(results),
+            "vector_weight": response.vector_weight_used,
+            "graph_weight": response.graph_weight_used,
+            "weights_adaptive": True,
+            "search_time_ms": round(response.search_time_ms, 2),
+            "ranking_changed": response.ranking_changed,
+            "results": results
+        }
         
     except Exception as e:
         logger.error(f"Hybrid search failed: {e}")

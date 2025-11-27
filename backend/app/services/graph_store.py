@@ -135,6 +135,9 @@ class GraphStore:
         node_id = node_data.id or generate_node_id()
         now = datetime.utcnow()
         
+        # Extract topic from metadata for direct Neo4j indexing
+        topic = node_data.metadata.get("topic", "") if node_data.metadata else ""
+        
         # Serialize metadata to JSON string for Neo4j storage
         metadata_json = json.dumps(node_data.metadata)
         
@@ -142,6 +145,7 @@ class GraphStore:
         CREATE (n:Node {
             id: $id,
             text: $text,
+            topic: $topic,
             metadata_json: $metadata_json,
             created_at: $created_at,
             updated_at: $updated_at
@@ -154,6 +158,7 @@ class GraphStore:
                 query,
                 id=node_id,
                 text=node_data.text,
+                topic=topic,
                 metadata_json=metadata_json,
                 created_at=now.isoformat(),
                 updated_at=now.isoformat()
@@ -546,7 +551,8 @@ class GraphStore:
     def traverse_with_distances(
         self,
         start_id: str,
-        depth: int = 1
+        depth: int = 1,
+        edge_type_filter: str = None
     ) -> list[tuple[Node, int, float]]:
         """
         Traverse with hop distance and path weight information.
@@ -554,25 +560,49 @@ class GraphStore:
         Args:
             start_id: ID of the starting node
             depth: Maximum number of hops
+            edge_type_filter: Optional edge type to filter (e.g., 'WEB', 'RELATED_TO')
             
         Returns:
             List of (node, hop_distance, path_weight) tuples
         """
         depth = max(1, min(5, depth))
         
-        query = """
-        MATCH (start:Node {id: $start_id})
-        OPTIONAL MATCH path = (start)-[:RELATION*1..""" + str(depth) + """]->(reachable:Node)
-        WHERE reachable.id <> $start_id
-        WITH reachable, 
-             min(length(path)) AS hop_distance,
-             [r IN relationships(path) | r.weight] AS weights
-        RETURN DISTINCT reachable, hop_distance, 
-               reduce(acc = 0.0, w IN weights | acc + COALESCE(w, 0)) AS path_weight
-        """
+        # Build relationship pattern - bidirectional traversal
+        # Use -[:RELATION*1..n]- for both directions
+        if edge_type_filter:
+            # Filter by specific edge type - check the 'type' property on the relationship
+            query = """
+            MATCH (start:Node {id: $start_id})
+            OPTIONAL MATCH path = (start)-[:RELATION*1..""" + str(depth) + """]-(reachable:Node)
+            WHERE reachable.id <> $start_id
+              AND ALL(r IN relationships(path) WHERE r.type = $edge_type)
+            WITH reachable, 
+                 min(length(path)) AS hop_distance,
+                 [r IN relationships(path) | r.weight] AS weights
+            WHERE reachable IS NOT NULL
+            RETURN DISTINCT reachable, hop_distance, 
+                   reduce(acc = 0.0, w IN weights | acc + COALESCE(w, 0)) AS path_weight
+            """
+        else:
+            # No filter - traverse all edge types bidirectionally
+            query = """
+            MATCH (start:Node {id: $start_id})
+            OPTIONAL MATCH path = (start)-[:RELATION*1..""" + str(depth) + """]-(reachable:Node)
+            WHERE reachable.id <> $start_id
+            WITH reachable, 
+                 min(length(path)) AS hop_distance,
+                 [r IN relationships(path) | r.weight] AS weights
+            WHERE reachable IS NOT NULL
+            RETURN DISTINCT reachable, hop_distance, 
+                   reduce(acc = 0.0, w IN weights | acc + COALESCE(w, 0)) AS path_weight
+            """
         
         with self._session() as session:
-            result = session.run(query, start_id=start_id)
+            params = {"start_id": start_id}
+            if edge_type_filter:
+                params["edge_type"] = edge_type_filter
+            
+            result = session.run(query, **params)
             nodes = []
             
             for record in result:
@@ -582,6 +612,7 @@ class GraphStore:
                     path_weight = record["path_weight"] or 0.0
                     nodes.append((node, hop_distance, path_weight))
             
+            logger.debug(f"Traversal from {start_id} (depth={depth}, edge_type={edge_type_filter}): found {len(nodes)} nodes")
             return nodes
     
     # =========================================================================

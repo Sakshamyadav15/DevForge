@@ -29,7 +29,7 @@ from app.services.vector_store import VectorStore
 from app.services.graph_store import GraphStore
 from app.services.snapshot import SnapshotManager
 from app.services.hybrid_engine import HybridEngine
-from app.api import nodes_router, edges_router, search_router
+from app.api import nodes_router, edges_router, search_router, ingest_router
 
 # =============================================================================
 # Logging Configuration
@@ -193,6 +193,7 @@ app.add_middleware(
 app.include_router(nodes_router)
 app.include_router(edges_router)
 app.include_router(search_router)
+app.include_router(ingest_router)
 
 
 # =============================================================================

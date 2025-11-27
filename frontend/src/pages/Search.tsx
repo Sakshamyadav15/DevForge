@@ -1,10 +1,9 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { searchApi, nodesApi } from "@/lib/api";
+import { searchApi, statsApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
@@ -23,53 +22,76 @@ import {
   Combine,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import type { SearchResult, Node, GraphSearchResult, VectorSearchResponse, GraphTraversalNode } from "@/types";
+import type { SearchResult, Node, VectorSearchResponse } from "@/types";
 
 type SearchMode = "vector" | "graph" | "hybrid";
+
+// Graph-only search result type
+interface GraphOnlyResult {
+  id: string;
+  text_snippet: string;
+  topic: string;
+  hop_distance: number;
+  degree: number;
+  graph_score: number;
+  is_direct_match: boolean;
+}
+
+interface GraphOnlyResponse {
+  search_type: string;
+  query_text: string | null;
+  topic_filter: string | null;
+  depth: number;
+  direct_matches: number;
+  traversed_found: number;
+  total_results: number;
+  results: GraphOnlyResult[];
+}
 
 const Search = () => {
   const [searchMode, setSearchMode] = useState<SearchMode>("hybrid");
   
-  // Vector search state
+  // Common search state
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(10);
   
   // Graph search state
-  const [startNodeId, setStartNodeId] = useState("");
+  const [graphTopic, setGraphTopic] = useState<string>("");
   const [traversalDepth, setTraversalDepth] = useState(2);
-  const [relationshipType, setRelationshipType] = useState<string>("");
-  
-  // Hybrid search state
-  const [vectorWeight, setVectorWeight] = useState([0.7]);
-  const [graphWeight, setGraphWeight] = useState([0.3]);
 
   // Search results
   const [vectorResults, setVectorResults] = useState<VectorSearchResponse | null>(null);
-  const [graphResults, setGraphResults] = useState<GraphSearchResult | null>(null);
+  const [graphOnlyResults, setGraphOnlyResults] = useState<GraphOnlyResponse | null>(null);
   const [hybridResults, setHybridResults] = useState<{ results: SearchResult[] } | null>(null);
 
-  // Fetch nodes for graph search dropdown
-  const { data: nodesData } = useQuery({
-    queryKey: ["nodes-for-search"],
-    queryFn: () => nodesApi.getAll({ skip: 0, limit: 100 }),
+  // Fetch stats to get available topics
+  const { data: statsData } = useQuery({
+    queryKey: ["stats-for-search"],
+    queryFn: () => statsApi.get(),
   });
+
+  // Get topics from stats
+  const availableTopics = useMemo(() => {
+    if (!statsData?.topic_distribution) return [];
+    return statsData.topic_distribution.map((item: { name: string }) => item.name);
+  }, [statsData]);
 
   // Vector search mutation
   const vectorSearch = useMutation({
     mutationFn: searchApi.vector,
     onSuccess: (data) => {
       setVectorResults(data);
-      setGraphResults(null);
+      setGraphOnlyResults(null);
       setHybridResults(null);
     },
   });
 
-  // Graph search mutation
-  const graphSearch = useMutation({
-    mutationFn: ({ startId, depth, relType }: { startId: string; depth: number; relType?: string }) =>
-      searchApi.graph(startId, depth, relType || undefined),
+  // Graph-only search mutation (NO vectors!)
+  const graphOnlySearch = useMutation({
+    mutationFn: (params: { query_text?: string; topic?: string; depth?: number; top_k?: number }) =>
+      searchApi.graphOnly(params),
     onSuccess: (data) => {
-      setGraphResults(data);
+      setGraphOnlyResults(data);
       setVectorResults(null);
       setHybridResults(null);
     },
@@ -81,12 +103,12 @@ const Search = () => {
     onSuccess: (data) => {
       setHybridResults(data);
       setVectorResults(null);
-      setGraphResults(null);
+      setGraphOnlyResults(null);
     },
   });
 
-  const isPending = vectorSearch.isPending || graphSearch.isPending || hybridSearch.isPending;
-  const error = vectorSearch.error || graphSearch.error || hybridSearch.error;
+  const isPending = vectorSearch.isPending || graphOnlySearch.isPending || hybridSearch.isPending;
+  const error = vectorSearch.error || graphOnlySearch.error || hybridSearch.error;
 
   const handleVectorSearch = () => {
     if (!query.trim()) return;
@@ -97,21 +119,22 @@ const Search = () => {
   };
 
   const handleGraphSearch = () => {
-    if (!startNodeId) return;
-    graphSearch.mutate({
-      startId: startNodeId,
+    // Graph search can work with keyword, topic, or both
+    graphOnlySearch.mutate({
+      query_text: query.trim() || undefined,
+      topic: graphTopic || undefined,
       depth: traversalDepth,
-      relType: relationshipType || undefined,
+      top_k: topK,
     });
   };
 
   const handleHybridSearch = () => {
     if (!query.trim()) return;
+    // Backend decides weights adaptively based on query intent
     hybridSearch.mutate({
       query_text: query,
       top_k: topK,
-      vector_weight: vectorWeight[0],
-      graph_weight: graphWeight[0],
+      candidate_k: 30,  // Fetch more candidates for better re-ranking
     });
   };
 
@@ -186,78 +209,87 @@ const Search = () => {
     </div>
   );
 
-  const renderGraphResults = (result: GraphSearchResult) => (
+  // Graph-only search results renderer
+  const renderGraphOnlyResults = (response: GraphOnlyResponse) => (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold font-mono">
-          Graph Traversal Results
+          Graph-Only Results
         </h2>
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="border-2">
             <Network className="h-3 w-3 mr-1" />
-            Graph Search
+            Graph Search (No Vectors)
           </Badge>
           <Badge variant="secondary" className="border-2">
-            {result.total_nodes} nodes found
-          </Badge>
-          <Badge variant="secondary" className="border-2">
-            Max depth: {result.max_depth_reached}
+            {response.total_results} results
           </Badge>
         </div>
       </div>
 
-      {/* Start Node */}
-      <Card className="border-2 border-primary">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-lg">Start Node</CardTitle>
-            <Badge className="bg-primary">Root</Badge>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <h3 className="font-bold">{result.start_node?.title || result.start_node?.id}</h3>
-          <p className="text-xs text-muted-foreground font-mono">{result.start_node?.id}</p>
-          <p className="text-sm mt-2 line-clamp-2">{result.start_node?.text}</p>
-        </CardContent>
-      </Card>
+      {/* Search info */}
+      <div className="flex flex-wrap gap-2 text-sm">
+        {response.query_text && (
+          <Badge variant="outline">Keyword: "{response.query_text}"</Badge>
+        )}
+        {response.topic_filter && (
+          <Badge variant="outline">Topic: {response.topic_filter}</Badge>
+        )}
+        <Badge variant="secondary">Depth: {response.depth}</Badge>
+        <Badge variant="secondary">Direct matches: {response.direct_matches}</Badge>
+        <Badge variant="secondary">Traversed: {response.traversed_found}</Badge>
+      </div>
 
-      {/* Traversed Nodes */}
-      {result.traversed_nodes && result.traversed_nodes.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="font-mono text-sm uppercase tracking-wider text-muted-foreground">
-            Traversed Nodes ({result.traversed_nodes.length})
-          </h3>
-          <div className="grid gap-3">
-            {result.traversed_nodes.map((traversalNode: GraphTraversalNode) => (
-              <Card key={traversalNode.node.id} className="border-2">
-                <CardContent className="py-4">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h4 className="font-bold">{traversalNode.node.title || traversalNode.node.id}</h4>
-                      <p className="text-xs text-muted-foreground font-mono">{traversalNode.node.id}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="border-2">
-                        Hop {traversalNode.hop_distance}
-                      </Badge>
-                      <Badge variant="secondary" className="border-2">
-                        Weight: {traversalNode.path_weight.toFixed(2)}
-                      </Badge>
-                    </div>
-                  </div>
-                  <p className="text-sm mt-2 line-clamp-2">{traversalNode.node.text}</p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Results */}
+      {response.results.map((result, index) => (
+        <Card key={result.id} className={`border-2 ${result.is_direct_match ? 'border-primary' : ''}`}>
+          <CardContent className="pt-6">
+            <div className="flex items-start justify-between mb-3">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Badge variant="outline" className="border-2 font-mono">
+                    #{index + 1}
+                  </Badge>
+                  {result.is_direct_match && (
+                    <Badge className="bg-primary">Direct Match</Badge>
+                  )}
+                  {!result.is_direct_match && (
+                    <Badge variant="secondary">Hop {result.hop_distance}</Badge>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground font-mono">
+                  {result.id}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-2xl font-bold font-mono">
+                  {result.graph_score.toFixed(3)}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Graph Score
+                </div>
+              </div>
+            </div>
 
-      {(!result.traversed_nodes || result.traversed_nodes.length === 0) && (
+            <p className="text-sm mb-4 leading-relaxed">
+              {result.text_snippet}
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              {result.topic && (
+                <Badge variant="secondary">{result.topic}</Badge>
+              )}
+              <Badge variant="outline">Connections: {result.degree}</Badge>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+
+      {response.results.length === 0 && (
         <Card className="border-2">
           <CardContent className="py-8 text-center">
             <Network className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-            <p className="text-muted-foreground">No connected nodes found at depth {traversalDepth}</p>
+            <p className="text-muted-foreground">No nodes found. Try different keywords or topic.</p>
           </CardContent>
         </Card>
       )}
@@ -270,10 +302,15 @@ const Search = () => {
         <h2 className="text-xl font-bold font-mono">
           {results.length} Results
         </h2>
-        <Badge variant="outline" className="border-2">
-          <Combine className="h-3 w-3 mr-1" />
-          Hybrid Search
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="border-2">
+            <Combine className="h-3 w-3 mr-1" />
+            Hybrid Search
+          </Badge>
+          <Badge variant="secondary" className="border-2 text-xs">
+            Adaptive Weights
+          </Badge>
+        </div>
       </div>
 
       {results.map((result, index) => (
@@ -281,11 +318,18 @@ const Search = () => {
           <CardContent className="pt-6">
             <div className="flex items-start justify-between mb-3">
               <div>
-                <Badge variant="outline" className="border-2 font-mono mb-2">
-                  #{index + 1}
-                </Badge>
+                <div className="flex gap-2 mb-2">
+                  <Badge variant="outline" className="border-2 font-mono">
+                    #{result.rank || index + 1}
+                  </Badge>
+                  {result.vector_only_rank && result.vector_only_rank !== result.rank && (
+                    <Badge variant="secondary" className="text-xs">
+                      Vector-only: #{result.vector_only_rank}
+                    </Badge>
+                  )}
+                </div>
                 <h3 className="font-bold text-lg mt-1">
-                  {result.title || result.id}
+                  {result.metadata?.title || result.title || result.id}
                 </h3>
                 <p className="text-xs text-muted-foreground font-mono">
                   {result.id}
@@ -293,7 +337,7 @@ const Search = () => {
               </div>
               <div className="text-right">
                 <div className="text-2xl font-bold font-mono">
-                  {result.score.toFixed(3)}
+                  {(result.final_score ?? result.score ?? 0).toFixed(3)}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Final Score
@@ -302,33 +346,35 @@ const Search = () => {
             </div>
 
             <p className="text-sm mb-4 leading-relaxed line-clamp-3">
-              {result.text_snippet}
+              {result.text_snippet || result.text}
             </p>
 
             <div className="flex flex-wrap gap-4 text-xs font-mono">
               <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Vector:</span>
+                <span className="text-muted-foreground">Cosine:</span>
                 <Badge variant="secondary" className="border-2">
-                  {result.vector_score.toFixed(3)}
+                  {(result.cosine_sim ?? result.vector_score ?? 0).toFixed(3)}
                 </Badge>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">Graph:</span>
                 <Badge variant="secondary" className="border-2">
-                  {result.graph_score.toFixed(3)}
+                  {(result.graph_score ?? 0).toFixed(3)}
                 </Badge>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Neighbors:</span>
-                <Badge variant="outline" className="border-2">
-                  {result.neighbors}
-                </Badge>
-              </div>
-              {result.metadata?.topic && (
+              {(result.degree ?? result.neighbors) !== undefined && (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Degree:</span>
+                  <Badge variant="outline" className="border-2">
+                    {result.degree ?? result.neighbors}
+                  </Badge>
+                </div>
+              )}
+              {(result.topic || result.metadata?.topic) && (
                 <div className="flex items-center gap-2">
                   <span className="text-muted-foreground">Topic:</span>
                   <Badge variant="outline" className="border-2">
-                    {result.metadata.topic}
+                    {result.topic || result.metadata?.topic}
                   </Badge>
                 </div>
               )}
@@ -421,31 +467,45 @@ const Search = () => {
           </Card>
         </TabsContent>
 
-        {/* Graph Search Tab */}
+        {/* Graph Search Tab - Simple keyword + topic search */}
         <TabsContent value="graph">
           <Card className="border-2">
             <CardHeader>
               <CardTitle className="font-mono text-sm uppercase tracking-wider">
-                Graph Traversal Search
+                Graph Search (Keyword + Topic)
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label className="text-sm font-mono">Start Node</Label>
-                  <Select value={startNodeId} onValueChange={setStartNodeId}>
-                    <SelectTrigger className="border-2">
-                      <SelectValue placeholder="Select a node" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {nodesData?.items?.slice(0, 50).map((node: Node) => (
-                        <SelectItem key={node.id} value={node.id}>
-                          {(node.title || node.id).substring(0, 30)}...
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              {/* Simple keyword search */}
+              <div className="space-y-2">
+                <Label className="text-sm font-mono">Search Keywords</Label>
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Enter keywords to search in graph (e.g., AI, machine learning)..."
+                  className="border-2"
+                />
+              </div>
+
+              {/* Topic filter dropdown */}
+              <div className="space-y-2">
+                <Label className="text-sm font-mono">Filter by Topic (Optional)</Label>
+                <Select value={graphTopic || "ALL"} onValueChange={(v) => setGraphTopic(v === "ALL" ? "" : v)}>
+                  <SelectTrigger className="border-2">
+                    <SelectValue placeholder="Select a topic" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">All Topics</SelectItem>
+                    {availableTopics.map((topic: string) => (
+                      <SelectItem key={topic} value={topic}>
+                        {topic}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label className="text-sm font-mono">Traversal Depth</Label>
                   <Select value={String(traversalDepth)} onValueChange={(v) => setTraversalDepth(Number(v))}>
@@ -453,42 +513,46 @@ const Search = () => {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="1">1 Hop</SelectItem>
+                      <SelectItem value="1">1 Hop (Direct connections)</SelectItem>
                       <SelectItem value="2">2 Hops</SelectItem>
                       <SelectItem value="3">3 Hops</SelectItem>
-                      <SelectItem value="4">4 Hops</SelectItem>
+                      <SelectItem value="4">4 Hops (Deep exploration)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-sm font-mono">Relationship Type (Optional)</Label>
-                  <Input
-                    placeholder="e.g., RELATED_TO"
-                    value={relationshipType}
-                    onChange={(e) => setRelationshipType(e.target.value)}
-                    className="border-2"
-                  />
+                  <Label className="text-sm font-mono">Max Results</Label>
+                  <Select value={String(topK)} onValueChange={(v) => setTopK(Number(v))}>
+                    <SelectTrigger className="border-2">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="5">Top 5</SelectItem>
+                      <SelectItem value="10">Top 10</SelectItem>
+                      <SelectItem value="20">Top 20</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               <Button
                 onClick={handleSearch}
-                disabled={isPending || !startNodeId}
+                disabled={graphOnlySearch.isPending || !query.trim()}
                 className="border-2 w-full"
               >
-                {isPending ? (
+                {graphOnlySearch.isPending ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Traversing Graph
+                    Searching Graph
                   </>
                 ) : (
                   <>
                     <Network className="mr-2 h-4 w-4" />
-                    Traverse Graph
+                    Search Graph
                   </>
                 )}
               </Button>
               <p className="text-xs text-muted-foreground">
-                Explore connected nodes starting from a specific node in the knowledge graph
+                Search documents by keywords and optionally filter by topic, then explore connections in the graph
               </p>
             </CardContent>
           </Card>
@@ -499,14 +563,14 @@ const Search = () => {
           <Card className="border-2">
             <CardHeader>
               <CardTitle className="font-mono text-sm uppercase tracking-wider">
-                Hybrid Search Configuration
+                Hybrid Search (Vector + Graph)
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-6">
+            <CardContent className="space-y-4">
               <div className="flex gap-4">
                 <div className="flex-1">
                   <Input
-                    placeholder="Enter search query..."
+                    placeholder="Enter search query (e.g., 'AI in healthcare' or 'connection between finance and AI')..."
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -522,7 +586,6 @@ const Search = () => {
                       <SelectItem value="5">Top 5</SelectItem>
                       <SelectItem value="10">Top 10</SelectItem>
                       <SelectItem value="20">Top 20</SelectItem>
-                      <SelectItem value="50">Top 50</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -538,49 +601,25 @@ const Search = () => {
                     </>
                   ) : (
                     <>
-                      <SearchIcon className="mr-2 h-4 w-4" />
-                      Search
+                      <Combine className="mr-2 h-4 w-4" />
+                      Hybrid Search
                     </>
                   )}
                 </Button>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <Label className="text-sm font-medium font-mono">
-                    Vector Weight: {vectorWeight[0].toFixed(2)}
-                  </Label>
-                  <Slider
-                    value={vectorWeight}
-                    onValueChange={setVectorWeight}
-                    min={0}
-                    max={1}
-                    step={0.1}
-                    className="w-full"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Influence of semantic similarity
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-sm font-medium font-mono">
-                    Graph Weight: {graphWeight[0].toFixed(2)}
-                  </Label>
-                  <Slider
-                    value={graphWeight}
-                    onValueChange={setGraphWeight}
-                    min={0}
-                    max={1}
-                    step={0.1}
-                    className="w-full"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Influence of graph relationships
-                  </p>
-                </div>
+              <div className="bg-muted/50 rounded-lg p-3 text-sm">
+                <p className="font-medium mb-1">🧠 Adaptive Weights</p>
+                <p className="text-muted-foreground text-xs">
+                  The backend automatically adjusts vector/graph weights based on your query:
+                </p>
+                <ul className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                  <li>• <strong>Relationship queries</strong> ("between", "connected", "path") → More graph weight (60%)</li>
+                  <li>• <strong>Semantic queries</strong> (general text) → More vector weight (70%)</li>
+                </ul>
               </div>
               <p className="text-xs text-muted-foreground">
-                Combine vector similarity with graph relationships for enhanced retrieval
+                Combines FAISS vector similarity with Neo4j graph structure for best results
               </p>
             </CardContent>
           </Card>
@@ -597,10 +636,10 @@ const Search = () => {
 
       {/* Results Section */}
       {vectorResults && renderVectorResults(vectorResults)}
-      {graphResults && renderGraphResults(graphResults)}
+      {graphOnlyResults && renderGraphOnlyResults(graphOnlyResults)}
       {hybridResults?.results && renderHybridResults(hybridResults.results)}
 
-      {!vectorResults && !graphResults && !hybridResults && !isPending && (
+      {!vectorResults && !graphOnlyResults && !hybridResults && !isPending && (
         <Card className="border-2">
           <CardContent className="py-12 text-center">
             <SearchIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />

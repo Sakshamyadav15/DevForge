@@ -183,17 +183,19 @@ class HybridSearchRequest(BaseModel):
     """
     Request model for hybrid search combining vector and graph signals.
     
-    The hybrid search:
-    1. Gets semantic candidates from FAISS
-    2. Computes graph-based signals from Neo4j
-    3. Combines scores using adaptive or custom weights
+    The hybrid search uses ADAPTIVE WEIGHTS determined by the backend:
+    1. Gets semantic candidates from FAISS (candidate_k items)
+    2. Computes graph-based signals from Neo4j for each candidate
+    3. Backend detects query intent and chooses weights automatically
+    4. Combines scores and returns top_k results
+    
+    **IMPORTANT**: Frontend does NOT provide weights. Backend decides based on query.
     
     Example:
         {
             "query_text": "AI applications in healthcare",
-            "top_k": 5,
-            "vector_weight": 0.7,
-            "graph_weight": 0.3
+            "top_k": 10,
+            "candidate_k": 30
         }
     """
     query_text: str = Field(
@@ -203,37 +205,16 @@ class HybridSearchRequest(BaseModel):
         description="The search query text"
     )
     top_k: int = Field(
-        default=5,
+        default=10,
         ge=1,
         le=100,
         description="Number of final results to return"
     )
     candidate_k: int = Field(
-        default=20,
+        default=30,
         ge=1,
         le=500,
         description="Number of candidates to fetch from vector search before re-ranking"
-    )
-    vector_weight: Optional[float] = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
-        description="Weight for vector similarity (0-1). If null, uses adaptive weighting."
-    )
-    graph_weight: Optional[float] = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
-        description="Weight for graph score (0-1). If null, uses adaptive weighting."
-    )
-    # Optional filters
-    source_filter: Optional[str] = Field(
-        default=None,
-        description="Filter results by source metadata"
-    )
-    topic_filter: Optional[str] = Field(
-        default=None,
-        description="Filter results by topic metadata"
     )
 
 

@@ -472,15 +472,23 @@ class SnapshotManager:
         for i, (node_id, node_data) in enumerate(snapshot.nodes.items()):
             try:
                 # Truncate text to max 50000 chars to meet validation
-                text = node_data["text"]
+                text = node_data.get("text", "")
                 if len(text) > 50000:
                     text = text[:50000]
+                
+                # Get topic from node_data (top-level) or metadata
+                topic = node_data.get("topic", "")
+                metadata = node_data.get("metadata", {})
+                
+                # Ensure topic is in metadata for consistency
+                if topic and "topic" not in metadata:
+                    metadata["topic"] = topic
                 
                 # Create node in Neo4j
                 node_create = NodeCreate(
                     id=node_id,
                     text=text,
-                    metadata=node_data.get("metadata", {})
+                    metadata=metadata
                 )
                 graph_store.create_node(node_create)
                 
@@ -616,8 +624,8 @@ class SnapshotManager:
         for node_id, node_data in self._cache.nodes.items():
             metadata = node_data.get("metadata", {})
             
-            # Count topics
-            topic = metadata.get("topic", "unknown")
+            # Count topics - check both top-level and in metadata
+            topic = node_data.get("topic") or metadata.get("topic", "unknown")
             topic_counts[topic] = topic_counts.get(topic, 0) + 1
             
             # Count categories

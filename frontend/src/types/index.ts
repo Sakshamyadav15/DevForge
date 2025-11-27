@@ -44,15 +44,23 @@ export interface EdgeCreate {
 }
 
 export interface SearchResult {
-  // Simplified format from /hybrid/simple endpoint
+  // Format from POST /search/hybrid with adaptive weights
   id: string;
-  title?: string;
-  text_snippet: string;
-  score: number;
-  vector_score: number;
-  graph_score: number;
-  neighbors: number;
+  text: string;
+  topic?: string;
   metadata?: Record<string, any>;
+  cosine_sim: number;      // Raw cosine similarity
+  graph_score: number;     // Normalized graph score
+  final_score: number;     // Combined score
+  rank: number;
+  vector_only_rank?: number;
+  degree?: number;
+  // Legacy compatibility
+  title?: string;
+  text_snippet?: string;
+  score?: number;          // Alias for final_score
+  vector_score?: number;   // Alias for cosine_sim
+  neighbors?: number;      // Alias for degree
 }
 
 // Legacy format from /hybrid endpoint (if needed)
@@ -116,10 +124,8 @@ export interface PaginatedResponse<T> {
 export interface SearchRequest {
   query_text: string;
   top_k?: number;
-  vector_weight?: number;
-  graph_weight?: number;
-  source_filter?: string;
-  topic_filter?: string;
+  candidate_k?: number;  // Optional, default 30
+  // NOTE: No vector_weight or graph_weight - backend decides these adaptively
 }
 
 export interface VectorSearchRequest {
@@ -167,4 +173,21 @@ export interface VectorSearchResponse {
 export interface NeighborsResponse {
   nodes: Node[];
   edges: Edge[];
+}
+
+// Graph-only search response (no vectors involved)
+export interface GraphOnlyResult {
+  node: Node;
+  match_type: string;      // "keyword" or "topic"
+  hop_distance: number;
+  edge_count: number;
+}
+
+export interface GraphOnlyResponse {
+  query_text?: string;
+  topic?: string;
+  depth: number;
+  results: GraphOnlyResult[];
+  total_results: number;
+  search_time_ms: number;
 }
