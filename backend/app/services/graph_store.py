@@ -588,6 +588,20 @@ class GraphStore:
     # Utility Methods
     # =========================================================================
     
+    def get_node_count(self) -> int:
+        """
+        Get the total number of nodes in the graph.
+        
+        Returns:
+            Number of nodes
+        """
+        query = "MATCH (n:Node) RETURN count(n) as count"
+        
+        with self._session() as session:
+            result = session.run(query)
+            record = result.single()
+            return record["count"] if record else 0
+    
     def clear_all(self) -> None:
         """
         Delete all nodes and relationships from the graph.

@@ -107,11 +107,14 @@ def load_from_huggingface(limit: int = 25000, topic: str = "arxiv") -> Generator
         doc_id = f"hf_{topic}_{i:06d}"
         
         # Get text and abstract
-        text = str(item.get(text_field, ""))[:5000]
+        text = str(item.get(text_field, ""))
         abstract = str(item.get(abstract_field, ""))
         
         if abstract:
             text = f"{abstract}\n\n{text}"
+        
+        # Truncate to max 45000 chars (leaving room for safety margin)
+        text = text[:45000]
         
         if len(text) < 100:
             continue
@@ -309,8 +312,8 @@ def write_to_snapshot(
             # Sequential connections
             for j in range(min(len(group_ids) - 1, 5000)):
                 edges.append({
-                    "source": group_ids[j],
-                    "target": group_ids[j + 1],
+                    "source_id": group_ids[j],
+                    "target_id": group_ids[j + 1],
                     "type": "RELATED_TO",
                     "weight": round(random.uniform(0.6, 0.9), 3),
                     "metadata": {"auto_generated": True, "topic": topic}
@@ -323,8 +326,8 @@ def write_to_snapshot(
             for j in range(0, len(sampled) - 1, 2):
                 edge_type = random.choice(EDGE_TYPES)
                 edges.append({
-                    "source": sampled[j],
-                    "target": sampled[j + 1],
+                    "source_id": sampled[j],
+                    "target_id": sampled[j + 1],
                     "type": edge_type,
                     "weight": round(random.uniform(0.5, 1.0), 3),
                     "metadata": {"auto_generated": True, "topic": topic}

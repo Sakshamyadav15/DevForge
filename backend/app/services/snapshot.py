@@ -405,10 +405,19 @@ class SnapshotManager:
         Returns:
             Tuple of (nodes_rebuilt, edges_rebuilt)
         """
+        import time
         logger.info("Starting index rebuild from snapshot...")
         
         # Load snapshot data
         snapshot = self.load_snapshot()
+        total_nodes = len(snapshot.nodes)
+        total_edges = len(snapshot.edges)
+        
+        if total_nodes == 0:
+            logger.info("Snapshot is empty, nothing to rebuild")
+            return 0, 0
+        
+        logger.info(f"Rebuilding {total_nodes} nodes and {total_edges} edges...")
         
         # Clear existing data in Neo4j
         try:
@@ -421,26 +430,39 @@ class SnapshotManager:
         
         nodes_rebuilt = 0
         edges_rebuilt = 0
+        start_time = time.time()
         
         # Import here to avoid circular imports
         from app.models.graph import NodeCreate, EdgeCreate
         
-        # Rebuild nodes
-        for node_id, node_data in snapshot.nodes.items():
+        # Rebuild nodes with progress logging
+        for i, (node_id, node_data) in enumerate(snapshot.nodes.items()):
             try:
+                # Truncate text to max 50000 chars to meet validation
+                text = node_data["text"]
+                if len(text) > 50000:
+                    text = text[:50000]
+                
                 # Create node in Neo4j
                 node_create = NodeCreate(
                     id=node_id,
-                    text=node_data["text"],
+                    text=text,
                     metadata=node_data.get("metadata", {})
                 )
                 graph_store.create_node(node_create)
                 
                 # Generate embedding and add to FAISS
-                embedding = embedding_service.embed(node_data["text"])
+                embedding = embedding_service.embed(text)
                 vector_store.add_embedding(node_id, embedding)
                 
                 nodes_rebuilt += 1
+                
+                # Log progress every 100 nodes
+                if nodes_rebuilt % 100 == 0:
+                    elapsed = time.time() - start_time
+                    rate = nodes_rebuilt / elapsed if elapsed > 0 else 0
+                    remaining = (total_nodes - nodes_rebuilt) / rate if rate > 0 else 0
+                    logger.info(f"  Progress: {nodes_rebuilt}/{total_nodes} nodes ({rate:.1f}/sec, ~{remaining:.0f}s remaining)")
                 
             except Exception as e:
                 logger.error(f"Failed to rebuild node {node_id}: {e}")

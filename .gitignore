@@ -1,5 +1,154 @@
-venv/*
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================
+# Virtual Environments
+# ==========================
+venv/
 backend/venv/
+ENV/
+env/
+.venv/
+.conda/
+
+# ==========================
+# Environment Variables
+# ==========================
 .env
+.env.local
+.env.*.local
+*.env
+
+# ==========================
+# IDE / Editor
+# ==========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ==========================
+# Jupyter Notebook
+# ==========================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==========================
+# Testing
+# ==========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+nosetests.xml
+
+# ==========================
+# Type Checking
+# ==========================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ==========================
+# FAISS / Vector Index
+# ==========================
+*.faiss
+*.mappings.json
+
+# ==========================
+# Data Files
+# ==========================
 backend/data/
-node_modules
+!backend/data/.gitkeep
+
+# ==========================
+# Logs
+# ==========================
+*.log
+logs/
+log/
+
+# ==========================
+# OS Files
+# ==========================
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ==========================
+# Temporary Files
+# ==========================
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.cache/
+
+# ==========================
+# Node.js (Frontend)
+# ==========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn/
+
+# ==========================
+# Build / Distribution
+# ==========================
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# ==========================
+# Docker
+# ==========================
+*.log
+docker-compose.override.yml
+
+# ==========================
+# Secrets / Credentials
+# ==========================
+*.pem
+*.key
+secrets/
+credentials/

@@ -83,26 +83,40 @@ async def lifespan(app: FastAPI):
     # 2. Initialize Vector Store (FAISS)
     logger.info("Initializing vector store...")
     vector_store = VectorStore(dim=embedding_service.dimension)
-    logger.info(f"Vector store: {vector_store}")
+    
+    # Try to load persisted FAISS index
+    faiss_path = "data/vector_index"
+    faiss_loaded = vector_store.load(faiss_path)
+    if faiss_loaded:
+        logger.info(f"Loaded persisted FAISS index: {vector_store}")
+    else:
+        logger.info(f"No persisted FAISS index found")
     
     # 3. Initialize Graph Store (Neo4j)
     logger.info("Connecting to Neo4j...")
+    neo4j_has_data = False
     try:
         graph_store = GraphStore()
         logger.info("Neo4j connected successfully")
+        neo4j_node_count = graph_store.get_node_count()
+        if neo4j_node_count > 0:
+            neo4j_has_data = True
+            logger.info(f"Neo4j already has {neo4j_node_count} nodes")
     except Exception as e:
         logger.warning(f"Failed to connect to Neo4j: {e}")
         logger.warning("Running in degraded mode - graph operations will fail")
-        # Create a dummy graph store that will fail gracefully
         graph_store = None
     
     # 4. Initialize Snapshot Manager
     logger.info("Initializing snapshot manager...")
     snapshot_manager = SnapshotManager()
     
-    # 5. Rebuild indexes from snapshot if configured and Neo4j is available
-    if settings.auto_rebuild_on_startup and graph_store is not None:
-        logger.info("Rebuilding indexes from snapshot...")
+    # 5. Rebuild indexes from snapshot if needed
+    # Only rebuild if BOTH FAISS and Neo4j are empty
+    needs_rebuild = not faiss_loaded or not neo4j_has_data
+    
+    if settings.auto_rebuild_on_startup and graph_store is not None and needs_rebuild:
+        logger.info("Rebuilding indexes from snapshot (this may take a while for large datasets)...")
         try:
             nodes_rebuilt, edges_rebuilt = snapshot_manager.rebuild_indexes(
                 graph_store=graph_store,
@@ -110,6 +124,9 @@ async def lifespan(app: FastAPI):
                 embedding_service=embedding_service
             )
             logger.info(f"Rebuilt {nodes_rebuilt} nodes and {edges_rebuilt} edges from snapshot")
+            
+            # Save FAISS index for next startup
+            vector_store.save(faiss_path)
         except Exception as e:
             logger.warning(f"Failed to rebuild indexes: {e}")
     
@@ -263,6 +280,57 @@ async def get_stats():
             "log_level": settings.log_level
         }
     }
+
+
+@app.post("/admin/save-index", tags=["Admin"])
+async def save_faiss_index():
+    """
+    Save the current FAISS index to disk.
+    
+    Call this after ingesting new data to persist the index.
+    """
+    try:
+        faiss_path = "data/vector_index"
+        vector_store.save(faiss_path)
+        return {
+            "status": "success",
+            "message": f"FAISS index saved ({vector_store.size} vectors)",
+            "path": faiss_path
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/admin/rebuild", tags=["Admin"])
+async def force_rebuild():
+    """
+    Force rebuild of FAISS and Neo4j indexes from snapshot.
+    
+    WARNING: This will clear all existing data and regenerate from snapshot.
+    This can take a long time for large datasets.
+    """
+    if graph_store is None:
+        return {"status": "error", "message": "Neo4j not connected"}
+    
+    try:
+        nodes_rebuilt, edges_rebuilt = snapshot_manager.rebuild_indexes(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_service=embedding_service
+        )
+        
+        # Save FAISS index
+        faiss_path = "data/vector_index"
+        vector_store.save(faiss_path)
+        
+        return {
+            "status": "success",
+            "nodes_rebuilt": nodes_rebuilt,
+            "edges_rebuilt": edges_rebuilt,
+            "faiss_saved": True
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 # =============================================================================

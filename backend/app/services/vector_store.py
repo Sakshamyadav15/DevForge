@@ -6,6 +6,7 @@ It implements:
 - In-memory vector index with ID mapping
 - Cosine similarity search (via inner product on normalized vectors)
 - Add/delete operations for dynamic updates
+- Persistence to disk (save/load)
 
 FAISS Configuration:
 - Uses IndexFlatIP (Inner Product) for exact search
@@ -22,9 +23,11 @@ Note: For larger datasets (>1M vectors), consider using IVF indices for
 approximate search with better memory/speed tradeoffs.
 """
 
+import json
 import logging
 import numpy as np
 import faiss
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -274,6 +277,69 @@ class VectorStore:
             Number of embeddings stored
         """
         return self.index.ntotal
+    
+    def save(self, path: str) -> None:
+        """
+        Save the FAISS index and ID mappings to disk.
+        
+        Args:
+            path: Base path for saving (will create .faiss and .json files)
+        """
+        base_path = Path(path)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save FAISS index
+        faiss_path = str(base_path) + ".faiss"
+        faiss.write_index(self.index, faiss_path)
+        
+        # Save ID mappings
+        mappings_path = str(base_path) + ".mappings.json"
+        mappings = {
+            "id_to_faiss": self.id_to_faiss,
+            "faiss_to_id": {str(k): v for k, v in self.faiss_to_id.items()},
+            "next_faiss_id": self.next_faiss_id,
+            "dimension": self.dimension
+        }
+        with open(mappings_path, 'w') as f:
+            json.dump(mappings, f)
+        
+        logger.info(f"VectorStore saved to {base_path} ({self.size} vectors)")
+    
+    def load(self, path: str) -> bool:
+        """
+        Load the FAISS index and ID mappings from disk.
+        
+        Args:
+            path: Base path for loading (expects .faiss and .json files)
+            
+        Returns:
+            True if loaded successfully, False if files don't exist
+        """
+        faiss_path = str(path) + ".faiss"
+        mappings_path = str(path) + ".mappings.json"
+        
+        if not Path(faiss_path).exists() or not Path(mappings_path).exists():
+            logger.debug(f"No saved index found at {path}")
+            return False
+        
+        try:
+            # Load FAISS index
+            self.index = faiss.read_index(faiss_path)
+            
+            # Load ID mappings
+            with open(mappings_path, 'r') as f:
+                mappings = json.load(f)
+            
+            self.id_to_faiss = mappings["id_to_faiss"]
+            self.faiss_to_id = {int(k): v for k, v in mappings["faiss_to_id"].items()}
+            self.next_faiss_id = mappings["next_faiss_id"]
+            
+            logger.info(f"VectorStore loaded from {path} ({self.size} vectors)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load VectorStore: {e}")
+            return False
     
     def __len__(self) -> int:
         """Return the number of vectors in the store."""
