@@ -1,0 +1,54 @@
+# DevForge - Hybrid Vector + Graph Database for AI Retrieval
+# Python Dependencies
+
+# =============================================================================
+# Core Framework
+# =============================================================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# =============================================================================
+# Vector Store (FAISS)
+# =============================================================================
+# faiss-cpu for CPU-only systems (recommended for development)
+# For GPU support, use faiss-gpu instead
+faiss-cpu>=1.7.4
+
+# =============================================================================
+# Embeddings
+# =============================================================================
+# sentence-transformers includes transformers, torch, and other dependencies
+sentence-transformers>=2.2.2
+numpy>=1.24.0
+
+# =============================================================================
+# Graph Database (Neo4j)
+# =============================================================================
+neo4j>=5.14.0
+
+# =============================================================================
+# HTTP Client (for seed script)
+# =============================================================================
+requests>=2.31.0
+
+# =============================================================================
+# Development Dependencies
+# =============================================================================
+# Uncomment these for development/testing
+
+# Testing
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# httpx>=0.25.0  # For testing FastAPI
+
+# Code Quality
+# black>=23.0.0
+# isort>=5.12.0
+# mypy>=1.6.0
+# flake8>=6.1.0
+
+# Documentation
+# mkdocs>=1.5.0
+# mkdocs-material>=9.4.0
