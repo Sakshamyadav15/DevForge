@@ -344,12 +344,17 @@ async def get_node_neighbors(
     description="""
     Update an existing node's text and/or metadata.
     
-    If the text is updated, the embedding is regenerated in FAISS.
+    If the text is updated, the embedding is automatically regenerated.
+    You can also force embedding regeneration using regen_embedding=true.
     """
 )
 async def update_node(
     node_id: str,
     update_data: NodeUpdate,
+    regen_embedding: bool = Query(
+        default=False, 
+        description="Force regenerate embedding even if text unchanged"
+    ),
     graph_store=Depends(get_graph_store),
     vector_store=Depends(get_vector_store),
     embedding_service=Depends(get_embedding_service),
@@ -361,6 +366,7 @@ async def update_node(
     Args:
         node_id: The node ID to update
         update_data: Fields to update
+        regen_embedding: Force embedding regeneration (default: False)
         
     Returns:
         The updated node
@@ -370,16 +376,22 @@ async def update_node(
         HTTPException 500: If update fails
     """
     try:
+        # Get old embedding for comparison if needed
+        old_embedding = None
+        if regen_embedding or update_data.text is not None:
+            old_embedding = vector_store.get_embedding(node_id)
+        
         # Update in Neo4j
         updated_node = graph_store.update_node(node_id, update_data)
         
         if not updated_node:
             raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
         
-        # If text was updated, regenerate embedding
-        if update_data.text is not None:
-            embedding = embedding_service.embed(updated_node.text)
-            vector_store.add_embedding(node_id, embedding)  # This updates if exists
+        # Regenerate embedding if text was updated OR if explicitly requested
+        if update_data.text is not None or regen_embedding:
+            new_embedding = embedding_service.embed(updated_node.text)
+            vector_store.add_embedding(node_id, new_embedding)  # This updates if exists
+            logger.info(f"Regenerated embedding for node: {node_id}")
         
         # Update snapshot
         snapshot_manager.update_node(

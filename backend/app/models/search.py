@@ -28,7 +28,8 @@ class VectorSearchRequest(BaseModel):
     Example:
         {
             "query_text": "machine learning in medical diagnosis",
-            "top_k": 5
+            "top_k": 5,
+            "metadata_filter": {"type": "note", "category": "research"}
         }
     """
     query_text: str = Field(
@@ -51,6 +52,10 @@ class VectorSearchRequest(BaseModel):
     topic_filter: Optional[str] = Field(
         default=None,
         description="Filter results by topic metadata"
+    )
+    metadata_filter: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Generic metadata filter. Only nodes matching ALL key-value pairs are returned. E.g., {'type': 'note', 'category': 'research'}"
     )
 
 
@@ -183,19 +188,29 @@ class HybridSearchRequest(BaseModel):
     """
     Request model for hybrid search combining vector and graph signals.
     
-    The hybrid search uses ADAPTIVE WEIGHTS determined by the backend:
+    The hybrid search can use:
+    1. ADAPTIVE WEIGHTS (default) - backend determines weights based on query intent
+    2. EXPLICIT WEIGHTS - when vector_weight and graph_weight are provided
+    
+    **Process:**
     1. Gets semantic candidates from FAISS (candidate_k items)
     2. Computes graph-based signals from Neo4j for each candidate
-    3. Backend detects query intent and chooses weights automatically
-    4. Combines scores and returns top_k results
+    3. Normalizes scores to [0, 1] range
+    4. Combines: final_score = vector_weight * cosine_norm + graph_weight * graph_norm
+    5. Returns top_k results with full scoring breakdown
     
-    **IMPORTANT**: Frontend does NOT provide weights. Backend decides based on query.
+    Example (adaptive):
+        {
+            "query_text": "AI applications in healthcare",
+            "top_k": 10
+        }
     
-    Example:
+    Example (explicit weights):
         {
             "query_text": "AI applications in healthcare",
             "top_k": 10,
-            "candidate_k": 30
+            "vector_weight": 0.7,
+            "graph_weight": 0.3
         }
     """
     query_text: str = Field(
@@ -215,6 +230,18 @@ class HybridSearchRequest(BaseModel):
         ge=1,
         le=500,
         description="Number of candidates to fetch from vector search before re-ranking"
+    )
+    vector_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Weight for vector similarity (0.0 to 1.0). If not provided, uses adaptive weights."
+    )
+    graph_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Weight for graph score (0.0 to 1.0). If not provided, uses adaptive weights."
     )
 
 

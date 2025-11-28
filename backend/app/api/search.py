@@ -70,6 +70,12 @@ def get_hybrid_engine():
     2. Searches FAISS for the most similar vectors
     3. Returns nodes ranked by cosine similarity
     
+    **Filtering:**
+    - `source_filter`: Filter by source metadata
+    - `topic_filter`: Filter by topic metadata
+    - `metadata_filter`: Generic filter - only nodes matching ALL key-value pairs returned
+      Example: `{"type": "note"}` returns only nodes where metadata.type = "note"
+    
     Use this for pure semantic search without considering graph structure.
     Compare with /search/hybrid to see the benefit of graph signals.
     """
@@ -84,7 +90,7 @@ async def vector_search(
     Perform vector-only semantic search.
     
     Args:
-        request: Search request with query_text and top_k
+        request: Search request with query_text, top_k, and optional filters
         
     Returns:
         VectorSearchResponse with ranked results
@@ -97,7 +103,8 @@ async def vector_search(
         
         # Search FAISS
         # Fetch extra candidates for filtering
-        search_k = request.top_k * 2 if request.source_filter or request.topic_filter else request.top_k
+        has_filters = request.source_filter or request.topic_filter or request.metadata_filter
+        search_k = request.top_k * 3 if has_filters else request.top_k
         vector_results = vector_store.search(query_embedding, top_k=search_k)
         
         # Build results with node details
@@ -119,6 +126,16 @@ async def vector_search(
             if request.topic_filter and node.metadata.get("topic") != request.topic_filter:
                 continue
             
+            # Apply generic metadata filter (TC-VEC-03)
+            if request.metadata_filter:
+                match = True
+                for key, value in request.metadata_filter.items():
+                    if node.metadata.get(key) != value:
+                        match = False
+                        break
+                if not match:
+                    continue
+            
             results.append(VectorSearchResult(
                 node=node,
                 cosine_similarity=cosine_sim,
@@ -138,6 +155,80 @@ async def vector_search(
     except Exception as e:
         logger.error(f"Vector search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get(
+    "/graph/traverse",
+    response_model=GraphSearchResponse,
+    summary="Graph traversal (GET) - BFS depth-limited",
+    description="""
+    Perform BFS (breadth-first) graph traversal from a starting node.
+    
+    Returns all nodes reachable within the specified depth, with their hop distances.
+    
+    **Example:**
+    Given chain A -> B -> C -> D, query with `start_id=A, depth=2`:
+    - Returns B (depth 1), C (depth 2)
+    - Does NOT return D (depth 3, exceeds limit)
+    
+    **Cycle Handling:** Nodes are visited only once; traversal terminates safely.
+    
+    **Edge Type Filtering:** Use `edge_type` to filter traversal to specific relationship types.
+    """
+)
+async def graph_traverse_get(
+    start_id: str = Query(..., description="ID of the starting node"),
+    depth: int = Query(default=2, ge=1, le=5, description="Maximum traversal depth (hops)"),
+    edge_type: Optional[str] = Query(default=None, description="Filter by edge type (e.g., 'RELATED_TO', 'author_of')"),
+    graph_store=Depends(get_graph_store)
+) -> GraphSearchResponse:
+    """
+    GET endpoint for graph traversal (TC-GRAPH-01 compliant).
+    
+    Args:
+        start_id: ID of the starting node
+        depth: Maximum number of hops
+        edge_type: Optional edge type filter
+        
+    Returns:
+        GraphSearchResponse with traversed nodes and their hop distances
+    """
+    try:
+        # Verify start node exists
+        start_node = graph_store.get_node(start_id)
+        if not start_node:
+            raise HTTPException(status_code=404, detail=f"Start node '{start_id}' not found")
+        
+        # Perform traversal with distances
+        traversal_results = graph_store.traverse_with_distances(start_id, depth, edge_type)
+        
+        # Build response
+        traversed_nodes = []
+        max_depth_reached = 0
+        
+        for node, hop_distance, path_weight in traversal_results:
+            traversed_nodes.append(GraphTraversalNode(
+                node=node,
+                hop_distance=hop_distance,
+                path_weight=path_weight
+            ))
+            max_depth_reached = max(max_depth_reached, hop_distance)
+        
+        # Sort by hop distance, then by path weight (descending)
+        traversed_nodes.sort(key=lambda x: (x.hop_distance, -x.path_weight))
+        
+        return GraphSearchResponse(
+            start_node=start_node,
+            traversed_nodes=traversed_nodes,
+            total_nodes=len(traversed_nodes),
+            max_depth_reached=max_depth_reached
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Graph traversal failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Traversal failed: {str(e)}")
 
 
 @router.post(
@@ -602,13 +693,18 @@ async def list_graph_topics(
 
 @router.post(
     "/hybrid",
-    summary="Hybrid search (vector + graph) with adaptive weights",
+    summary="Hybrid search (vector + graph) with configurable weights",
     description="""
     Perform hybrid search combining vector similarity and graph signals.
     
-    **ADAPTIVE WEIGHTS** - Backend decides weights automatically:
-    - If query contains relationship keywords (between, connected, path, etc.) → graph_weight=0.6, vector_weight=0.4
-    - Otherwise → vector_weight=0.7, graph_weight=0.3
+    **WEIGHT MODES:**
+    1. **Adaptive (default)** - If no weights provided, backend auto-detects:
+       - Relationship queries ("between", "connected", etc.) → graph_weight=0.6, vector_weight=0.4
+       - Standard queries → vector_weight=0.7, graph_weight=0.3
+    
+    2. **Explicit** - Provide `vector_weight` and `graph_weight` (must sum to 1.0)
+       - `vector_weight=1.0, graph_weight=0.0` → Pure vector search ordering
+       - `vector_weight=0.0, graph_weight=1.0` → Pure graph proximity ordering
     
     **How it works:**
     1. Embed query, search FAISS for top candidate_k nodes
@@ -622,11 +718,12 @@ async def list_graph_topics(
     {
       "query_text": "AI in healthcare",
       "top_k": 10,
-      "candidate_k": 30
+      "vector_weight": 0.7,
+      "graph_weight": 0.3
     }
     ```
     
-    **Response:** Array of results with full scoring breakdown.
+    **Response:** Array of results with full scoring breakdown {vector_score, graph_score, final_score}.
     """
 )
 async def hybrid_search(
@@ -635,22 +732,39 @@ async def hybrid_search(
     graph_store=Depends(get_graph_store)
 ):
     """
-    Perform hybrid search with adaptive weights.
+    Perform hybrid search with adaptive or explicit weights.
     
     Args:
-        request: HybridSearchRequest with query_text, top_k, candidate_k
+        request: HybridSearchRequest with query_text, top_k, candidate_k, and optional weights
         
     Returns:
         List of results with id, text, topic, metadata, cosine_sim, graph_score, final_score
     """
     try:
-        # Use hybrid engine with NO explicit weights - it will use adaptive weights
+        # Determine if using adaptive or explicit weights
+        use_explicit = request.vector_weight is not None and request.graph_weight is not None
+        
+        if use_explicit:
+            # Validate weights sum to ~1.0
+            weight_sum = request.vector_weight + request.graph_weight
+            if abs(weight_sum - 1.0) > 0.01:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"vector_weight + graph_weight must equal 1.0, got {weight_sum}"
+                )
+            vector_weight = request.vector_weight
+            graph_weight = request.graph_weight
+        else:
+            # Use adaptive weights (None triggers auto-detection in engine)
+            vector_weight = None
+            graph_weight = None
+        
         response = hybrid_engine.hybrid_search(
             query_text=request.query_text,
             top_k=request.top_k,
             candidate_k=request.candidate_k,
-            vector_weight=None,  # Force adaptive
-            graph_weight=None    # Force adaptive
+            vector_weight=vector_weight,
+            graph_weight=graph_weight
         )
         
         # Transform to the required JSON format
@@ -678,12 +792,14 @@ async def hybrid_search(
             "total_results": len(results),
             "vector_weight": response.vector_weight_used,
             "graph_weight": response.graph_weight_used,
-            "weights_adaptive": True,
+            "weights_adaptive": response.weights_adaptive,
             "search_time_ms": round(response.search_time_ms, 2),
             "ranking_changed": response.ranking_changed,
             "results": results
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Hybrid search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")

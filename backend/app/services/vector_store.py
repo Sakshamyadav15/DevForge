@@ -137,6 +137,29 @@ class VectorStore:
         
         logger.debug(f"Added embedding for node '{node_id}' (FAISS ID: {faiss_id})")
     
+    def get_embedding(self, node_id: str) -> Optional[np.ndarray]:
+        """
+        Retrieve the embedding for a node.
+        
+        Args:
+            node_id: The string ID of the node
+            
+        Returns:
+            The embedding vector as numpy array, or None if not found
+        """
+        if node_id not in self.id_to_faiss:
+            return None
+        
+        faiss_id = self.id_to_faiss[node_id]
+        
+        # Reconstruct the embedding from FAISS
+        try:
+            embedding = self.index.reconstruct(faiss_id)
+            return embedding
+        except Exception as e:
+            logger.warning(f"Could not reconstruct embedding for {node_id}: {e}")
+            return None
+    
     def delete_embedding(self, node_id: str) -> bool:
         """
         Remove an embedding from the store.
