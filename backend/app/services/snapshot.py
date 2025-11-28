@@ -146,8 +146,24 @@ class SnapshotManager:
             return self._cache
         
         try:
-            with open(self.snapshot_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(self.snapshot_path, 'r', encoding='utf-8-sig') as f:
+                content = f.read().strip()
+            
+            # Handle empty or whitespace-only files
+            if not content:
+                logger.warning("Snapshot file is empty, starting with empty data")
+                self._cache = SnapshotData(
+                    metadata={
+                        "version": "1.0",
+                        "created_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                )
+                # Write valid empty JSON to fix the file
+                self.save_snapshot()
+                return self._cache
+            
+            data = json.loads(content)
             
             # Handle both formats:
             # 1. List format: [{"id": "...", "text": "...", ...}, ...]
@@ -247,6 +263,25 @@ class SnapshotManager:
         # Write to file
         self._write_snapshot(snapshot)
         self._cache = snapshot
+    
+    def save_current_snapshot(self) -> None:
+        """
+        Save the current cache state to the snapshot file.
+        
+        This is useful after making incremental changes via append_node/append_edge.
+        """
+        if self._cache is None:
+            logger.warning("No cache loaded, nothing to save")
+            return
+        
+        # Update metadata
+        self._cache.metadata["updated_at"] = datetime.utcnow().isoformat()
+        self._cache.metadata["node_count"] = len(self._cache.nodes)
+        self._cache.metadata["edge_count"] = len(self._cache.edges)
+        
+        # Write to file
+        self._write_snapshot(self._cache)
+        logger.debug("Saved current snapshot to file")
     
     def append_node(self, node: Node) -> None:
         """
@@ -545,8 +580,18 @@ class SnapshotManager:
             with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(snapshot.to_dict(), f, indent=2, ensure_ascii=False)
             
-            # Atomic rename
-            temp_path.replace(self.snapshot_path)
+            # Try atomic rename, fallback to direct write if file is locked
+            try:
+                temp_path.replace(self.snapshot_path)
+            except (OSError, PermissionError) as e:
+                logger.warning(f"Atomic rename failed (file may be locked): {e}")
+                logger.info("Falling back to direct write...")
+                # Fallback: direct write to the target file
+                with open(self.snapshot_path, 'w', encoding='utf-8') as f:
+                    json.dump(snapshot.to_dict(), f, indent=2, ensure_ascii=False)
+                # Clean up temp file
+                if temp_path.exists():
+                    temp_path.unlink()
             
         except Exception as e:
             # Clean up temp file on error

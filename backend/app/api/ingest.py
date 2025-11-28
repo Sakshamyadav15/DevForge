@@ -493,9 +493,12 @@ async def ingest_bulk_nodes(request: BulkIngestRequest):
 
 def chunk_document(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
     """
-    Split a document into overlapping chunks.
+    Semantic chunking - splits document by meaning, sections, and topic boundaries.
     
-    Uses sentence boundaries when possible for cleaner chunks.
+    Uses multiple strategies:
+    1. Detect section headers (markdown, numbered, titled sections)
+    2. Group semantically related paragraphs
+    3. Split on topic shifts
     """
     import re
     
@@ -504,54 +507,140 @@ def chunk_document(text: str, chunk_size: int = 500, chunk_overlap: int = 50) ->
     if not text:
         return []
     
-    # Try to split by paragraphs first
-    paragraphs = re.split(r'\n\s*\n', text)
-    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    # =========================================================================
+    # SECTION DETECTION PATTERNS
+    # =========================================================================
+    
+    # Markdown headers: # Header, ## Subheader, etc.
+    markdown_header = r'^#{1,6}\s+.+'
+    
+    # Numbered sections: 1. Title, 1.1 Title, (1) Title, etc.
+    numbered_section = r'^[\d]+[\.\)]\s*[\d\.\)]*\s*[A-Z].*'
+    
+    # Title case lines (potential headers): Understanding Blood Relations
+    title_case_header = r'^[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)+\s*$'
+    
+    # Lines ending with colon (often introduce sections)
+    colon_header = r'^[A-Z][^.!?]*:\s*$'
+    
+    # ALL CAPS headers
+    caps_header = r'^[A-Z\s]{5,}$'
+    
+    # Combine all header patterns
+    header_pattern = f'({markdown_header}|{numbered_section}|{title_case_header}|{colon_header}|{caps_header})'
+    
+    # =========================================================================
+    # SPLIT INTO SEMANTIC SECTIONS
+    # =========================================================================
+    
+    lines = text.split('\n')
+    sections = []
+    current_section = {"header": None, "content": []}
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # Check if this line is a header
+        is_header = bool(re.match(header_pattern, line_stripped, re.MULTILINE))
+        
+        # Also detect topic shift keywords
+        topic_shift_keywords = [
+            "introduction", "overview", "background", "methodology", "methods",
+            "results", "conclusion", "summary", "discussion", "example",
+            "types of", "common", "key", "important", "understanding",
+            "how to", "what is", "why", "when", "where", "benefits",
+            "advantages", "disadvantages", "steps", "process", "tips"
+        ]
+        is_topic_shift = any(
+            line_stripped.lower().startswith(kw) or line_stripped.lower().endswith(kw)
+            for kw in topic_shift_keywords
+        ) and len(line_stripped) < 100
+        
+        if (is_header or is_topic_shift) and line_stripped:
+            # Save previous section if it has content
+            if current_section["content"]:
+                sections.append(current_section)
+            # Start new section
+            current_section = {"header": line_stripped, "content": []}
+        else:
+            # Add to current section
+            if line_stripped:
+                current_section["content"].append(line_stripped)
+    
+    # Don't forget the last section
+    if current_section["content"] or current_section["header"]:
+        sections.append(current_section)
+    
+    # =========================================================================
+    # CREATE SEMANTIC CHUNKS
+    # =========================================================================
     
     chunks = []
-    current_chunk = ""
     
-    for para in paragraphs:
-        # If adding this paragraph exceeds chunk size, save current and start new
-        if len(current_chunk) + len(para) > chunk_size and current_chunk:
-            chunks.append(current_chunk.strip())
-            # Keep overlap from the end of current chunk
-            if chunk_overlap > 0 and len(current_chunk) > chunk_overlap:
-                current_chunk = current_chunk[-chunk_overlap:] + " " + para
-            else:
-                current_chunk = para
-        else:
-            if current_chunk:
-                current_chunk += "\n\n" + para
-            else:
-                current_chunk = para
-    
-    # Don't forget the last chunk
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    # If we only got one chunk that's still too big, split by sentences
-    if len(chunks) == 1 and len(chunks[0]) > chunk_size * 1.5:
-        text = chunks[0]
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        chunks = []
-        current_chunk = ""
+    for section in sections:
+        # Build section text with header
+        section_text = ""
+        if section["header"]:
+            section_text = section["header"] + "\n\n"
+        section_text += "\n".join(section["content"])
+        section_text = section_text.strip()
         
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
-                chunks.append(current_chunk.strip())
-                if chunk_overlap > 0 and len(current_chunk) > chunk_overlap:
-                    current_chunk = current_chunk[-chunk_overlap:] + " " + sentence
+        if not section_text:
+            continue
+        
+        # If section fits in one chunk, keep it together (semantic unit)
+        if len(section_text) <= chunk_size * 1.5:
+            chunks.append(section_text)
+        else:
+            # Section too large - split by paragraphs while keeping context
+            paragraphs = section["content"]
+            header = section["header"] or ""
+            
+            current_chunk = header + "\n\n" if header else ""
+            
+            for para in paragraphs:
+                if len(current_chunk) + len(para) > chunk_size and current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    # Keep header context for continuity
+                    current_chunk = f"[Continued] {header}\n\n" if header else ""
+                    current_chunk += para
                 else:
-                    current_chunk = sentence
+                    current_chunk += para + "\n"
+            
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+    
+    # =========================================================================
+    # FALLBACK: If no sections detected, use paragraph-based chunking
+    # =========================================================================
+    
+    if not chunks:
+        paragraphs = re.split(r'\n\s*\n', text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        
+        current_chunk = ""
+        for para in paragraphs:
+            if len(current_chunk) + len(para) > chunk_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = para
             else:
                 if current_chunk:
-                    current_chunk += " " + sentence
+                    current_chunk += "\n\n" + para
                 else:
-                    current_chunk = sentence
+                    current_chunk = para
         
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
+    
+    # Final cleanup - merge very small chunks with previous
+    if len(chunks) > 1:
+        merged_chunks = [chunks[0]]
+        for chunk in chunks[1:]:
+            if len(chunk) < 100 and len(merged_chunks[-1]) + len(chunk) < chunk_size:
+                merged_chunks[-1] += "\n\n" + chunk
+            else:
+                merged_chunks.append(chunk)
+        chunks = merged_chunks
     
     return chunks if chunks else [text]
 
@@ -708,12 +797,7 @@ async def ingest_document(request: DocumentIngestRequest):
             vector_store.add_embedding(node_id, embedding)
             
             # Save to snapshot
-            snapshot_node_data = {
-                "text": chunk_text,
-                "topic": topic,
-                "metadata": chunk_metadata
-            }
-            update_snapshot_with_node(node_id, snapshot_node_data)
+            snapshot_manager.append_node(node)
             
             # Track for relationship creation
             created_nodes.append({
@@ -736,13 +820,7 @@ async def ingest_document(request: DocumentIngestRequest):
                     type="NEXT_CHUNK",
                     weight=1.0  # Strong sequential connection
                 ))
-                update_snapshot_with_edge({
-                    "id": edge.id,
-                    "source_id": created_nodes[i]["id"],
-                    "target_id": created_nodes[i+1]["id"],
-                    "type": "NEXT_CHUNK",
-                    "weight": 1.0
-                })
+                snapshot_manager.append_edge(edge)
                 total_edges_created += 1
             except Exception as e:
                 logger.warning(f"Failed to create sequential edge: {e}")
@@ -767,6 +845,9 @@ async def ingest_document(request: DocumentIngestRequest):
         
         # 5. Save FAISS index
         save_faiss_index(vector_store)
+        
+        # 6. Ensure snapshot is saved
+        snapshot_manager.save_current_snapshot()
         
         logger.info(f"Successfully ingested document '{doc_title}' with {len(created_nodes)} chunks and {total_edges_created} edges")
         
