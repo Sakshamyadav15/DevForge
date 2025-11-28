@@ -38,7 +38,7 @@ export function AppSidebar() {
       <SidebarContent>
         <div className="p-4 border-b-2 border-border">
           <h1 className="text-lg font-bold tracking-tight">
-            {open ? "DevForge Studio" : "DF"}
+            {open ? "HybridDB" : "HD"}
           </h1>
         </div>
         <SidebarGroup>

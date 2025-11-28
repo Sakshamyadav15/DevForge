@@ -563,12 +563,13 @@ class GraphStore:
             edge_type_filter: Optional edge type to filter (e.g., 'WEB', 'RELATED_TO')
             
         Returns:
-            List of (node, hop_distance, path_weight) tuples
+            List of (node, hop_distance, path_weight) tuples - each node appears only once
         """
         depth = max(1, min(5, depth))
         
         # Build relationship pattern - bidirectional traversal
         # Use -[:RELATION*1..n]- for both directions
+        # Group by reachable node FIRST to ensure no duplicates
         if edge_type_filter:
             # Filter by specific edge type - check the 'type' property on the relationship
             query = """
@@ -578,10 +579,9 @@ class GraphStore:
               AND ALL(r IN relationships(path) WHERE r.type = $edge_type)
             WITH reachable, 
                  min(length(path)) AS hop_distance,
-                 [r IN relationships(path) | r.weight] AS weights
+                 max(reduce(acc = 0.0, r IN relationships(path) | acc + COALESCE(r.weight, 0))) AS path_weight
             WHERE reachable IS NOT NULL
-            RETURN DISTINCT reachable, hop_distance, 
-                   reduce(acc = 0.0, w IN weights | acc + COALESCE(w, 0)) AS path_weight
+            RETURN reachable, hop_distance, path_weight
             """
         else:
             # No filter - traverse all edge types bidirectionally
@@ -591,10 +591,9 @@ class GraphStore:
             WHERE reachable.id <> $start_id
             WITH reachable, 
                  min(length(path)) AS hop_distance,
-                 [r IN relationships(path) | r.weight] AS weights
+                 max(reduce(acc = 0.0, r IN relationships(path) | acc + COALESCE(r.weight, 0))) AS path_weight
             WHERE reachable IS NOT NULL
-            RETURN DISTINCT reachable, hop_distance, 
-                   reduce(acc = 0.0, w IN weights | acc + COALESCE(w, 0)) AS path_weight
+            RETURN reachable, hop_distance, path_weight
             """
         
         with self._session() as session:
@@ -604,10 +603,14 @@ class GraphStore:
             
             result = session.run(query, **params)
             nodes = []
+            seen_ids = set()  # Extra safety: deduplicate in Python too
             
             for record in result:
                 if record["reachable"]:
                     node = self._record_to_node(record["reachable"])
+                    if node.id in seen_ids:
+                        continue
+                    seen_ids.add(node.id)
                     hop_distance = record["hop_distance"] or 0
                     path_weight = record["path_weight"] or 0.0
                     nodes.append((node, hop_distance, path_weight))

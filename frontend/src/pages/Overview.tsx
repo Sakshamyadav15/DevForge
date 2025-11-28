@@ -57,7 +57,7 @@ const Overview = () => {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">System Overview</h1>
           <p className="text-muted-foreground mt-1">
-            DevForge hybrid vector + graph retrieval system
+            HybridDB - Vector + Graph retrieval system
           </p>
         </div>
         <Button onClick={handleRefresh} variant="outline" className="border-2">
@@ -104,9 +104,9 @@ const Overview = () => {
         />
         <StatCard
           title="Status"
-          value={health?.status === "ok" ? "Healthy" : "Error"}
+          value={health?.status === "healthy" || health?.status === "ok" ? "Healthy" : (health?.status || "Checking...")}
           icon={Activity}
-          description={`Updated ${new Date(stats?.snapshot_last_updated || "").toLocaleDateString()}`}
+          description="System status"
         />
       </div>
 
@@ -129,8 +129,8 @@ const Overview = () => {
           </div>
           <div className="flex justify-between items-center p-4 border-2 border-border">
             <span className="font-medium">System Status</span>
-            <span className={`font-bold ${health?.status === "ok" ? "text-green-600" : "text-red-600"}`}>
-              {health?.status?.toUpperCase() || "UNKNOWN"}
+            <span className={`font-bold ${health?.status === "healthy" || health?.status === "ok" ? "text-green-600" : "text-yellow-600"}`}>
+              {health?.status?.toUpperCase() || "CHECKING"}
             </span>
           </div>
         </CardContent>
