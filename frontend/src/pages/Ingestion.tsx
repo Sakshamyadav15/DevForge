@@ -7,16 +7,23 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Plus, Check, AlertCircle, Loader2, Database } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Plus, Check, AlertCircle, Loader2, Database, FileText } from "lucide-react";
 
 const Ingestion = () => {
   const queryClient = useQueryClient();
   
-  // Form state
+  // Entity form state
   const [text, setText] = useState("");
   const [title, setTitle] = useState("");
   const [topic, setTopic] = useState("");
   const [category, setCategory] = useState("");
+  
+  // Document form state
+  const [docContent, setDocContent] = useState("");
+  const [docTitle, setDocTitle] = useState("");
+  const [docTopic, setDocTopic] = useState("");
+  const [docSource, setDocSource] = useState("");
   
   // Success/error messages
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -28,23 +35,19 @@ const Ingestion = () => {
     retry: 1,
   });
 
-  // Mutation for ingesting a node
+  // Mutation for ingesting a single node/entity
   const ingestMutation = useMutation({
     mutationFn: (data: { text: string; metadata?: Record<string, any> }) =>
       ingestionApi.ingestNode(data),
     onSuccess: (response) => {
       setSuccessMessage(response.message);
       setErrorMessage(null);
-      // Clear form
       setText("");
       setTitle("");
       setTopic("");
       setCategory("");
-      // Refresh stats
       refetchStats();
-      // Invalidate nodes query so the Nodes page shows the new node
       queryClient.invalidateQueries({ queryKey: ["nodes"] });
-      // Clear success message after 5 seconds
       setTimeout(() => setSuccessMessage(null), 5000);
     },
     onError: (error: any) => {
@@ -55,7 +58,36 @@ const Ingestion = () => {
     },
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Mutation for ingesting a document
+  const documentMutation = useMutation({
+    mutationFn: (data: {
+      content: string;
+      title?: string;
+      topic?: string;
+      source?: string;
+    }) => ingestionApi.ingestDocument(data),
+    onSuccess: (response) => {
+      setSuccessMessage(
+        `Document "${response.title}" ingested successfully! Created ${response.chunks_created} chunks with ${response.edges_created} relationships.`
+      );
+      setErrorMessage(null);
+      setDocContent("");
+      setDocTitle("");
+      setDocTopic("");
+      setDocSource("");
+      refetchStats();
+      queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      setTimeout(() => setSuccessMessage(null), 8000);
+    },
+    onError: (error: any) => {
+      setErrorMessage(
+        error.response?.data?.detail || error.message || "Failed to ingest document"
+      );
+      setSuccessMessage(null);
+    },
+  });
+
+  const handleEntitySubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!text.trim()) {
@@ -75,12 +107,30 @@ const Ingestion = () => {
     });
   };
 
+  const handleDocumentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!docContent.trim() || docContent.trim().length < 10) {
+      setErrorMessage("Document content must be at least 10 characters");
+      return;
+    }
+
+    documentMutation.mutate({
+      content: docContent.trim(),
+      title: docTitle.trim() || undefined,
+      topic: docTopic.trim() || undefined,
+      source: docSource.trim() || undefined,
+    });
+  };
+
+  const isLoading = ingestMutation.isPending || documentMutation.isPending;
+
   return (
     <div className="p-8 space-y-6 max-w-4xl">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Data Ingestion</h1>
         <p className="text-muted-foreground mt-1">
-          Add new entities to the knowledge graph
+          Add entities or documents to the knowledge graph
         </p>
       </div>
 
@@ -135,106 +185,204 @@ const Ingestion = () => {
         </Alert>
       )}
 
-      {/* Ingestion Form */}
-      <Card className="border-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Plus className="h-5 w-5" />
-            Add New Entity
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Text Content - Main field */}
-            <div className="space-y-2">
-              <Label htmlFor="text" className="text-base font-medium">
-                Entity Text <span className="text-red-500">*</span>
-              </Label>
-              <Textarea
-                id="text"
-                placeholder="Enter the entity description or content... (e.g., 'Machine learning is a subset of artificial intelligence that enables systems to learn from data.')"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                className="min-h-[150px] border-2 font-mono text-sm"
-                disabled={ingestMutation.isPending}
-              />
-              <p className="text-xs text-muted-foreground">
-                This text will be embedded and stored in both the vector index and graph database.
-              </p>
-            </div>
+      {/* Tabbed Ingestion Forms */}
+      <Tabs defaultValue="entity" className="w-full">
+        <TabsList className="grid w-full grid-cols-2 border-2">
+          <TabsTrigger value="entity" className="flex items-center gap-2">
+            <Plus className="h-4 w-4" />
+            Single Entity
+          </TabsTrigger>
+          <TabsTrigger value="document" className="flex items-center gap-2">
+            <FileText className="h-4 w-4" />
+            Document (Unstructured)
+          </TabsTrigger>
+        </TabsList>
 
-            {/* Optional Metadata */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="title">Title (optional)</Label>
-                <Input
-                  id="title"
-                  placeholder="Short title..."
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="border-2"
-                  disabled={ingestMutation.isPending}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="topic">Topic (optional)</Label>
-                <Input
-                  id="topic"
-                  placeholder="e.g., machine_learning"
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  className="border-2"
-                  disabled={ingestMutation.isPending}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="category">Category (optional)</Label>
-                <Input
-                  id="category"
-                  placeholder="e.g., concept, definition"
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  className="border-2"
-                  disabled={ingestMutation.isPending}
-                />
-              </div>
-            </div>
+        {/* Single Entity Tab */}
+        <TabsContent value="entity">
+          <Card className="border-2">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Plus className="h-5 w-5" />
+                Add Single Entity
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleEntitySubmit} className="space-y-6">
+                <div className="space-y-2">
+                  <Label htmlFor="text" className="text-base font-medium">
+                    Entity Text <span className="text-red-500">*</span>
+                  </Label>
+                  <Textarea
+                    id="text"
+                    placeholder="Enter the entity description or content..."
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    className="min-h-[150px] border-2 font-mono text-sm"
+                    disabled={isLoading}
+                  />
+                </div>
 
-            {/* Submit Button */}
-            <div className="flex justify-end">
-              <Button
-                type="submit"
-                size="lg"
-                className="border-2 min-w-[200px]"
-                disabled={ingestMutation.isPending || !text.trim()}
-              >
-                {ingestMutation.isPending ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Ingesting...
-                  </>
-                ) : (
-                  <>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add to Graph
-                  </>
-                )}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="title">Title (optional)</Label>
+                    <Input
+                      id="title"
+                      placeholder="Short title..."
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="topic">Topic (optional)</Label>
+                    <Input
+                      id="topic"
+                      placeholder="e.g., technology"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="category">Category (optional)</Label>
+                    <Input
+                      id="category"
+                      placeholder="e.g., concept"
+                      value={category}
+                      onChange={(e) => setCategory(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <Button
+                    type="submit"
+                    size="lg"
+                    className="border-2 min-w-[200px]"
+                    disabled={isLoading || !text.trim()}
+                  >
+                    {ingestMutation.isPending ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Ingesting...
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="mr-2 h-4 w-4" />
+                        Add Entity
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Document Tab */}
+        <TabsContent value="document">
+          <Card className="border-2">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="h-5 w-5" />
+                Ingest Unstructured Document
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleDocumentSubmit} className="space-y-6">
+                <div className="space-y-2">
+                  <Label htmlFor="docContent" className="text-base font-medium">
+                    Document Content <span className="text-red-500">*</span>
+                  </Label>
+                  <Textarea
+                    id="docContent"
+                    placeholder="Paste your full document here... The system will automatically chunk it into connected entities."
+                    value={docContent}
+                    onChange={(e) => setDocContent(e.target.value)}
+                    className="min-h-[250px] border-2 font-mono text-sm"
+                    disabled={isLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Large documents will be chunked into multiple connected nodes with sequential and semantic relationships.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="docTitle">Document Title (optional)</Label>
+                    <Input
+                      id="docTitle"
+                      placeholder="Document name..."
+                      value={docTitle}
+                      onChange={(e) => setDocTitle(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="docTopic">Topic (optional)</Label>
+                    <Input
+                      id="docTopic"
+                      placeholder="Auto-detected if empty"
+                      value={docTopic}
+                      onChange={(e) => setDocTopic(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="docSource">Source (optional)</Label>
+                    <Input
+                      id="docSource"
+                      placeholder="e.g., research_paper"
+                      value={docSource}
+                      onChange={(e) => setDocSource(e.target.value)}
+                      className="border-2"
+                      disabled={isLoading}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <Button
+                    type="submit"
+                    size="lg"
+                    className="border-2 min-w-[200px]"
+                    disabled={isLoading || !docContent.trim() || docContent.trim().length < 10}
+                  >
+                    {documentMutation.isPending ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Processing...
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="mr-2 h-4 w-4" />
+                        Ingest Document
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       {/* Info */}
       <Alert className="border-2">
         <AlertDescription className="text-sm">
-          <strong>What happens when you add an entity:</strong>
+          <strong>How It Works:</strong>
           <ul className="mt-2 space-y-1 list-disc list-inside text-muted-foreground">
-            <li>The text is converted into a 384-dimensional embedding</li>
-            <li>A new node is created in the Neo4j graph database</li>
-            <li>The embedding is added to the FAISS vector index for similarity search</li>
-            <li><strong>Relationships are automatically created</strong> with similar existing nodes</li>
-            <li>The entity is persisted to snapshot.json for data backup</li>
+            <li><strong>Smart Chunking:</strong> Documents are automatically split into optimal chunks</li>
+            <li><strong>Entity Extraction:</strong> Topics and entities are auto-detected from content</li>
+            <li><strong>Relationship Building:</strong> Chunks are connected by sequence and semantic similarity</li>
+            <li><strong>Full Persistence:</strong> Saved to Neo4j (graph), FAISS (vectors), and snapshot</li>
           </ul>
         </AlertDescription>
       </Alert>

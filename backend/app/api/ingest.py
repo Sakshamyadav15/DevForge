@@ -43,6 +43,24 @@ class BulkIngestRequest(BaseModel):
     nodes: List[NodeIngestRequest] = Field(..., description="List of nodes to ingest")
 
 
+class DocumentIngestRequest(BaseModel):
+    """Request model for ingesting unstructured documents that get chunked into entities."""
+    content: str = Field(..., description="The full document/text content to be processed", min_length=10)
+    title: Optional[str] = Field(default=None, description="Document title")
+    source: Optional[str] = Field(default=None, description="Source of the document")
+    topic: Optional[str] = Field(default=None, description="Topic/category of the document")
+
+
+class DocumentIngestResponse(BaseModel):
+    """Response model for document ingestion."""
+    document_id: str
+    title: str
+    chunks_created: int
+    nodes: List[Dict[str, Any]]
+    edges_created: int
+    message: str
+
+
 class NodeIngestResponse(BaseModel):
     """Response model for single node ingestion."""
     node: Dict[str, Any]
@@ -63,7 +81,12 @@ class BulkIngestResponse(BaseModel):
 
 def get_services():
     """Get the global service instances from main module."""
-    from app.main import embedding_service, vector_store, graph_store, snapshot_manager
+    import app.main as main_module
+    
+    embedding_service = getattr(main_module, 'embedding_service', None)
+    vector_store = getattr(main_module, 'vector_store', None)
+    graph_store = getattr(main_module, 'graph_store', None)
+    snapshot_manager = getattr(main_module, 'snapshot_manager', None)
     
     if not embedding_service:
         raise HTTPException(status_code=503, detail="Embedding service not available")
@@ -462,3 +485,305 @@ async def ingest_bulk_nodes(request: BulkIngestRequest):
         edges_created=total_edges_created,
         message=message
     )
+
+
+# =============================================================================
+# Document Chunking Utilities
+# =============================================================================
+
+def chunk_document(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+    """
+    Split a document into overlapping chunks.
+    
+    Uses sentence boundaries when possible for cleaner chunks.
+    """
+    import re
+    
+    # Clean the text
+    text = text.strip()
+    if not text:
+        return []
+    
+    # Try to split by paragraphs first
+    paragraphs = re.split(r'\n\s*\n', text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    
+    chunks = []
+    current_chunk = ""
+    
+    for para in paragraphs:
+        # If adding this paragraph exceeds chunk size, save current and start new
+        if len(current_chunk) + len(para) > chunk_size and current_chunk:
+            chunks.append(current_chunk.strip())
+            # Keep overlap from the end of current chunk
+            if chunk_overlap > 0 and len(current_chunk) > chunk_overlap:
+                current_chunk = current_chunk[-chunk_overlap:] + " " + para
+            else:
+                current_chunk = para
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + para
+            else:
+                current_chunk = para
+    
+    # Don't forget the last chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # If we only got one chunk that's still too big, split by sentences
+    if len(chunks) == 1 and len(chunks[0]) > chunk_size * 1.5:
+        text = chunks[0]
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
+                chunks.append(current_chunk.strip())
+                if chunk_overlap > 0 and len(current_chunk) > chunk_overlap:
+                    current_chunk = current_chunk[-chunk_overlap:] + " " + sentence
+                else:
+                    current_chunk = sentence
+            else:
+                if current_chunk:
+                    current_chunk += " " + sentence
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+    
+    return chunks if chunks else [text]
+
+
+def extract_entities_and_topics(text: str) -> Dict[str, Any]:
+    """
+    Extract key entities and infer topic from text using simple NLP.
+    """
+    import re
+    
+    # Common topic keywords
+    topic_keywords = {
+        "technology": ["software", "programming", "code", "algorithm", "computer", "data", "api", "system", "database", "server", "cloud", "ai", "machine learning", "neural", "network"],
+        "science": ["research", "study", "experiment", "theory", "hypothesis", "scientific", "laboratory", "discovery", "physics", "chemistry", "biology"],
+        "business": ["company", "market", "revenue", "profit", "customer", "product", "service", "management", "strategy", "investment", "finance"],
+        "healthcare": ["medical", "health", "patient", "doctor", "hospital", "treatment", "disease", "medicine", "clinical", "diagnosis"],
+        "education": ["learning", "student", "teacher", "school", "university", "course", "training", "knowledge", "education", "study"],
+    }
+    
+    text_lower = text.lower()
+    
+    # Detect topic
+    topic_scores = {}
+    for topic, keywords in topic_keywords.items():
+        score = sum(1 for kw in keywords if kw in text_lower)
+        if score > 0:
+            topic_scores[topic] = score
+    
+    detected_topic = max(topic_scores, key=topic_scores.get) if topic_scores else "general"
+    
+    # Extract potential entities (capitalized words that aren't at sentence start)
+    words = text.split()
+    entities = []
+    for i, word in enumerate(words):
+        # Skip first word of sentences and common words
+        if i > 0 and word[0].isupper() and len(word) > 2:
+            clean_word = re.sub(r'[^\w\s]', '', word)
+            if clean_word and clean_word.lower() not in ["the", "this", "that", "these", "those", "and", "but", "for"]:
+                entities.append(clean_word)
+    
+    # Get unique entities
+    entities = list(set(entities))[:10]  # Limit to 10 entities
+    
+    return {
+        "topic": detected_topic,
+        "entities": entities,
+        "word_count": len(words)
+    }
+
+
+@router.post("/document", response_model=DocumentIngestResponse)
+async def ingest_document(request: DocumentIngestRequest):
+    """
+    Ingest an unstructured document by:
+    1. Automatically chunking the document into optimal entities/nodes
+    2. Generating embeddings for each chunk
+    3. Creating nodes in Neo4j for each chunk
+    4. Adding embeddings to FAISS
+    5. Creating SEQUENTIAL relationships between chunks (NEXT_CHUNK)
+    6. Creating SEMANTIC relationships based on similarity
+    7. Persisting to snapshot.json
+    
+    The system automatically determines optimal chunk size based on document length.
+    """
+    embedding_service, vector_store, graph_store, snapshot_manager = get_services()
+    
+    import uuid
+    
+    # Generate document ID
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    doc_title = request.title or request.content[:50].strip() + "..."
+    topic = request.topic
+    source = request.source or "document_upload"
+    
+    # Extract topic if not provided
+    if not topic:
+        extracted = extract_entities_and_topics(request.content)
+        topic = extracted["topic"]
+    
+    # SMART CHUNKING: Automatically determine optimal chunk size based on document length
+    doc_length = len(request.content)
+    if doc_length < 500:
+        # Very short document - treat as single node
+        chunk_size = doc_length + 1
+        chunk_overlap = 0
+    elif doc_length < 2000:
+        # Short document - larger chunks, minimal overlap
+        chunk_size = 500
+        chunk_overlap = 50
+    elif doc_length < 10000:
+        # Medium document - balanced chunks
+        chunk_size = 400
+        chunk_overlap = 80
+    else:
+        # Large document - smaller chunks for better granularity
+        chunk_size = 350
+        chunk_overlap = 100
+    
+    try:
+        # 1. Chunk the document with smart settings
+        logger.info(f"Chunking document '{doc_title}' (length={doc_length}) with auto chunk_size={chunk_size}, overlap={chunk_overlap}")
+        chunks = chunk_document(request.content, chunk_size, chunk_overlap)
+        
+        if not chunks:
+            raise HTTPException(status_code=400, detail="Document could not be chunked - too short or empty")
+        
+        logger.info(f"Created {len(chunks)} chunks from document")
+        
+        created_nodes = []
+        node_embeddings = []
+        total_edges_created = 0
+        
+        # 2. Process each chunk
+        for i, chunk_text in enumerate(chunks):
+            chunk_id = f"{doc_id}_chunk_{i:03d}"
+            chunk_title = f"{doc_title} [Part {i+1}/{len(chunks)}]"
+            
+            # Extract entities from this chunk
+            chunk_info = extract_entities_and_topics(chunk_text)
+            
+            # Build metadata
+            chunk_metadata = {
+                "title": chunk_title,
+                "document_id": doc_id,
+                "document_title": doc_title,
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+                "source": source,
+                "topic": topic,
+                "entities": chunk_info["entities"],
+                "word_count": chunk_info["word_count"],
+            }
+            
+            # Generate embedding
+            logger.info(f"Generating embedding for chunk {i+1}/{len(chunks)}")
+            embedding = embedding_service.embed(chunk_text)
+            
+            # Create node in Neo4j
+            node = graph_store.create_node(NodeCreate(
+                text=chunk_text,
+                metadata={
+                    "title": chunk_title,
+                    "topic": topic,
+                    "document_id": doc_id,
+                    "chunk_index": i,
+                    "category": "document_chunk",
+                    "source": source,
+                }
+            ))
+            node_id = node.id
+            logger.info(f"Created node {node_id} in Neo4j")
+            
+            # Add to FAISS
+            vector_store.add_embedding(node_id, embedding)
+            
+            # Save to snapshot
+            snapshot_node_data = {
+                "text": chunk_text,
+                "topic": topic,
+                "metadata": chunk_metadata
+            }
+            update_snapshot_with_node(node_id, snapshot_node_data)
+            
+            # Track for relationship creation
+            created_nodes.append({
+                "id": node_id,
+                "chunk_index": i,
+                "text": chunk_text[:100] + "..." if len(chunk_text) > 100 else chunk_text,
+                "topic": topic,
+                "metadata": chunk_metadata
+            })
+            node_embeddings.append((node_id, embedding, topic))
+        
+        # 3. Create SEQUENTIAL relationships (NEXT_CHUNK) between consecutive chunks
+        logger.info("Creating sequential relationships between chunks")
+        for i in range(len(created_nodes) - 1):
+            try:
+                from app.models.graph import EdgeCreate
+                edge = graph_store.create_edge(EdgeCreate(
+                    source_id=created_nodes[i]["id"],
+                    target_id=created_nodes[i+1]["id"],
+                    type="NEXT_CHUNK",
+                    weight=1.0  # Strong sequential connection
+                ))
+                update_snapshot_with_edge({
+                    "id": edge.id,
+                    "source_id": created_nodes[i]["id"],
+                    "target_id": created_nodes[i+1]["id"],
+                    "type": "NEXT_CHUNK",
+                    "weight": 1.0
+                })
+                total_edges_created += 1
+            except Exception as e:
+                logger.warning(f"Failed to create sequential edge: {e}")
+        
+        # 4. Create SEMANTIC relationships based on similarity
+        logger.info("Creating semantic relationships between chunks")
+        for node_id, embedding, node_topic in node_embeddings:
+            try:
+                edges = find_and_create_relationships(
+                    node_id=node_id,
+                    node_text="",
+                    node_topic=node_topic,
+                    embedding=embedding,
+                    vector_store=vector_store,
+                    graph_store=graph_store,
+                    similarity_threshold=0.5,  # Higher threshold for same-document chunks
+                    max_edges=2
+                )
+                total_edges_created += edges
+            except Exception as e:
+                logger.warning(f"Failed to create semantic relationships for {node_id}: {e}")
+        
+        # 5. Save FAISS index
+        save_faiss_index(vector_store)
+        
+        logger.info(f"Successfully ingested document '{doc_title}' with {len(created_nodes)} chunks and {total_edges_created} edges")
+        
+        return DocumentIngestResponse(
+            document_id=doc_id,
+            title=doc_title,
+            chunks_created=len(created_nodes),
+            nodes=created_nodes,
+            edges_created=total_edges_created,
+            message=f"Document '{doc_title}' successfully ingested. Created {len(created_nodes)} chunks with {total_edges_created} relationships."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to ingest document: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to ingest document: {str(e)}"
+        )

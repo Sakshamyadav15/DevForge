@@ -368,6 +368,10 @@ class VectorStore:
         """Return the number of vectors in the store."""
         return self.size
     
+    def __bool__(self) -> bool:
+        """Return True if the store is initialized (even if empty)."""
+        return self.index is not None
+    
     def __repr__(self) -> str:
         """String representation of the store."""
         return f"VectorStore(dim={self.dimension}, size={self.size})"
